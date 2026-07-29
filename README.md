@@ -1,4 +1,4 @@
-# audio-video-editor
+# Video Toolkit
 
 Aplicativo desktop (Flutter/macOS) no estilo de um editor de vídeo para
 manipular as faixas de arquivos `.mp4` e `.mkv`. Interface Windows 11
@@ -15,7 +15,7 @@ pensada exclusivamente para uso horizontal em desktop (janela mínima
   Mac, Material no Ubuntu; não são réplicas pixel-perfect). Temas "de vidro"
   (Vista, 7 Aero, 10, macOS Moderno) ativam transparência real da janela
   (blur via NSVisualEffectView). A escolha fica salva em
-  `~/.audio_video_editor/theme.txt`.
+  `~/.video_toolkit/theme.txt`.
 - **Barra de menus nativa**: Arquivo (Abrir ⌘O, Salvar ⌘S, adicionar
   áudio/legenda), Temas e Ajuda.
 
@@ -80,7 +80,7 @@ Ou gere o app (aceita um vídeo como argumento):
 
 ```sh
 flutter build macos --release
-open build/macos/Build/Products/Release/audio_video_editor.app --args /caminho/video.mkv
+open "build/macos/Build/Products/Release/Video Toolkit.app" --args /caminho/video.mkv
 ```
 
 ## Testes

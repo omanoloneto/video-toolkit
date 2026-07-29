@@ -20,12 +20,12 @@ jobs:
       - name: Zip app bundle
         run: |
           cd build/macos/Build/Products/Release
-          ditto -c -k --keepParent audio_video_editor.app \
-            "AudioVideoEditor-${GITHUB_REF_NAME#v}-macos.zip"
+          ditto -c -k --keepParent "Video Toolkit.app" \
+            "VideoToolkit-${GITHUB_REF_NAME#v}-macos.zip"
       - uses: actions/upload-artifact@v4
         with:
           name: macos
-          path: build/macos/Build/Products/Release/AudioVideoEditor-*-macos.zip
+          path: build/macos/Build/Products/Release/VideoToolkit-*-macos.zip
 
   build-windows:
     runs-on: windows-latest
@@ -41,11 +41,11 @@ jobs:
         run: |
           $version = $env:GITHUB_REF_NAME.TrimStart('v')
           Compress-Archive -Path build/windows/x64/runner/Release/* `
-            -DestinationPath "AudioVideoEditor-$version-windows.zip"
+            -DestinationPath "VideoToolkit-$version-windows.zip"
       - uses: actions/upload-artifact@v4
         with:
           name: windows
-          path: AudioVideoEditor-*-windows.zip
+          path: VideoToolkit-*-windows.zip
 
   build-linux:
     runs-on: ubuntu-latest
@@ -66,7 +66,7 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           PKG=pkg
-          APPDIR="$PKG/usr/lib/audio-video-editor"
+          APPDIR="$PKG/usr/lib/video-toolkit"
           mkdir -p "$APPDIR" "$PKG/usr/bin" "$PKG/DEBIAN" \
             "$PKG/usr/share/applications" \
             "$PKG/usr/share/icons/hicolor/256x256/apps"
@@ -74,30 +74,30 @@ jobs:
           cp -r build/linux/x64/release/bundle/. "$APPDIR/"
 
           cat > "$PKG/DEBIAN/control" <<EOF
-          Package: audio-video-editor
+          Package: video-toolkit
           Version: $VERSION
           Section: video
           Priority: optional
           Architecture: amd64
           Depends: ffmpeg
           Maintainer: omanoloneto <mano.afonso93@gmail.com>
-          Description: Editor de faixas de audio, video e legendas (MP4/MKV)
+          Description: Video Toolkit - editor de faixas de audio, video e legendas (MP4/MKV)
            Editor visual de faixas com linha do tempo, preview e
            processamento via FFmpeg, feito em Flutter.
           EOF
 
-          ln -s ../lib/audio-video-editor/audio_video_editor \
-            "$PKG/usr/bin/audio-video-editor"
+          ln -s ../lib/video-toolkit/video_toolkit \
+            "$PKG/usr/bin/video-toolkit"
 
           convert assets/icon/icon.png -resize 256x256 \
-            "$PKG/usr/share/icons/hicolor/256x256/apps/audio-video-editor.png"
+            "$PKG/usr/share/icons/hicolor/256x256/apps/video-toolkit.png"
 
-          cat > "$PKG/usr/share/applications/audio-video-editor.desktop" <<EOF
+          cat > "$PKG/usr/share/applications/video-toolkit.desktop" <<EOF
           [Desktop Entry]
-          Name=Editor de Faixas
+          Name=Video Toolkit
           Comment=Editor de faixas de audio, video e legendas
-          Exec=audio-video-editor %f
-          Icon=audio-video-editor
+          Exec=video-toolkit %f
+          Icon=video-toolkit
           Terminal=false
           Type=Application
           Categories=AudioVideo;Video;AudioVideoEditing;
@@ -105,11 +105,11 @@ jobs:
           EOF
 
           dpkg-deb --build --root-owner-group "$PKG" \
-            "audio-video-editor_${VERSION}_amd64.deb"
+            "video-toolkit_${VERSION}_amd64.deb"
       - uses: actions/upload-artifact@v4
         with:
           name: linux
-          path: audio-video-editor_*_amd64.deb
+          path: video-toolkit_*_amd64.deb
 
   release:
     needs: [build-macos, build-windows, build-linux]
@@ -121,12 +121,12 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            AudioVideoEditor-*-macos.zip
-            AudioVideoEditor-*-windows.zip
-            audio-video-editor_*_amd64.deb
+            VideoToolkit-*-macos.zip
+            VideoToolkit-*-windows.zip
+            video-toolkit_*_amd64.deb
           generate_release_notes: true
           body: |
-            Editor de Faixas — editor visual de faixas de áudio, vídeo e
+            Video Toolkit — editor visual de faixas de áudio, vídeo e
             legendas para MP4/MKV (timeline, preview, temas e FFmpeg).
 
             **Requisito em todas as plataformas: FFmpeg instalado.**
@@ -134,6 +134,6 @@ jobs:
               app para Aplicativos. Na primeira abertura use botão direito →
               Abrir (app não assinado).
             - Windows: `winget install ffmpeg` · descompacte o zip e execute
-              `audio_video_editor.exe`.
-            - Linux (Debian/Ubuntu): `sudo apt install ./audio-video-editor_*_amd64.deb`
+              `video_toolkit.exe`.
+            - Linux (Debian/Ubuntu): `sudo apt install ./video-toolkit_*_amd64.deb`
               (o FFmpeg entra como dependência).

@@ -1,5 +1,5 @@
-import 'package:audio_video_editor/models/tracks.dart';
-import 'package:audio_video_editor/widgets/timeline_panel.dart';
+import 'package:video_toolkit/models/tracks.dart';
+import 'package:video_toolkit/widgets/timeline_panel.dart';
 import 'package:fluent_ui/fluent_ui.dart';
 import 'package:flutter_test/flutter_test.dart';
 

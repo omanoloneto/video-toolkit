@@ -319,7 +319,7 @@ class AppThemeScope extends InheritedWidget {
 // ------------------------------------------------------------- persistence
 
 String get _configPath => p.join(
-    Platform.environment['HOME'] ?? '.', '.audio_video_editor', 'theme.txt');
+    Platform.environment['HOME'] ?? '.', '.video_toolkit', 'theme.txt');
 
 Future<String?> loadSavedThemeId() async {
   try {

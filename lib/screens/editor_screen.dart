@@ -513,7 +513,7 @@ class _EditorScreenState extends State<EditorScreen> {
     final scope = AppThemeScope.of(context);
     return [
       PlatformMenu(
-        label: 'Editor de Faixas',
+        label: 'Video Toolkit',
         menus: [
           if (PlatformProvidedMenuItem.hasMenu(
               PlatformProvidedMenuItemType.about))
@@ -580,9 +580,9 @@ class _EditorScreenState extends State<EditorScreen> {
         label: 'Ajuda',
         menus: [
           PlatformMenuItem(
-            label: 'Sobre o Editor de Faixas',
+            label: 'Sobre o Video Toolkit',
             onSelected: () => _showError(
-              'Editor de Faixas',
+              'Video Toolkit',
               'Editor de faixas de áudio, vídeo e legendas para arquivos '
                   'MP4/MKV, usando FFmpeg.\n\n'
                   'Atalhos: espaço = play/pause · S = dividir · '
@@ -623,7 +623,7 @@ class _EditorScreenState extends State<EditorScreen> {
                 Icon(ThemeIcons.of(context).video,
                     size: 16, color: spec.topBarText),
                 const SizedBox(width: 8),
-                Text('Editor de Faixas',
+                Text('Video Toolkit',
                     style: theme.typography.bodyStrong
                         ?.copyWith(color: spec.topBarText)),
                 if (_file != null) ...[

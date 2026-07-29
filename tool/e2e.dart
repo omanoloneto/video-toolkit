@@ -7,8 +7,8 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:audio_video_editor/models/tracks.dart';
-import 'package:audio_video_editor/services/ffmpeg_service.dart';
+import 'package:video_toolkit/models/tracks.dart';
+import 'package:video_toolkit/services/ffmpeg_service.dart';
 
 Future<void> main() async {
   final service = FfmpegService();

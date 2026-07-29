@@ -1,9 +1,9 @@
 import 'dart:io';
 
-import 'package:audio_video_editor/main.dart';
-import 'package:audio_video_editor/screens/editor_screen.dart';
-import 'package:audio_video_editor/theme/app_themes.dart';
-import 'package:audio_video_editor/theme/theme_icons.dart';
+import 'package:video_toolkit/main.dart';
+import 'package:video_toolkit/screens/editor_screen.dart';
+import 'package:video_toolkit/theme/app_themes.dart';
+import 'package:video_toolkit/theme/theme_icons.dart';
 import 'package:fluent_ui/fluent_ui.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
@@ -49,7 +49,7 @@ void main() {
 
     // setTheme persists to disk — keep the user's real choice intact.
     final config = File(p.join(Platform.environment['HOME'] ?? '.',
-        '.audio_video_editor', 'theme.txt'));
+        '.video_toolkit', 'theme.txt'));
     final previous = config.existsSync() ? config.readAsStringSync() : null;
     addTearDown(() {
       if (previous == null) {
@@ -68,7 +68,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 300));
     await tester.pump(const Duration(milliseconds: 300));
 
-    final themed = tester.element(find.text('Editor de Faixas'));
+    final themed = tester.element(find.text('Video Toolkit'));
     expect(FluentTheme.of(themed).scaffoldBackgroundColor,
         const Color(0xFFC0C0C0));
   });

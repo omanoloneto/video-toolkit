@@ -69,7 +69,7 @@ class _AudioVideoEditorAppState extends State<AudioVideoEditorApp> {
   @override
   Widget build(BuildContext context) {
     return FluentApp(
-      title: 'Editor de Faixas',
+      title: 'Video Toolkit',
       debugShowCheckedModeBanner: false,
       theme: _spec.buildTheme(),
       home: AppThemeScope(

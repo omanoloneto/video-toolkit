@@ -1,5 +1,5 @@
-import 'package:audio_video_editor/models/tracks.dart';
-import 'package:audio_video_editor/services/ffmpeg_service.dart';
+import 'package:video_toolkit/models/tracks.dart';
+import 'package:video_toolkit/services/ffmpeg_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 const kSource = '/tmp/video.mkv';
