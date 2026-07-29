@@ -1,98 +1,169 @@
 # Video Toolkit
 
-Aplicativo desktop (Flutter/macOS) no estilo de um editor de vídeo para
-manipular as faixas de arquivos `.mp4` e `.mkv`. Interface Windows 11
-(Fluent Design, via [fluent_ui](https://pub.dev/packages/fluent_ui)),
-pensada exclusivamente para uso horizontal em desktop (janela mínima
-1100×680).
+**A desktop track editor for MP4 and MKV files — cut, merge, retime and remux
+audio, video and subtitle tracks without re-encoding the video.**
 
-## Funcionalidades
+[![Release](https://img.shields.io/github/v/release/omanoloneto/video-toolkit)](https://github.com/omanoloneto/video-toolkit/releases)
+[![Build](https://github.com/omanoloneto/video-toolkit/actions/workflows/release.yml/badge.svg)](https://github.com/omanoloneto/video-toolkit/actions)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+![Platforms](https://img.shields.io/badge/platforms-macOS%20·%20Windows%20·%20Linux-lightgrey)
 
-- **Temas**: menu nativo **Temas** na barra de menus do macOS com 10 temas
-  inspirados em sistemas clássicos — Windows 98, XP, Vista, 7 (Aero), 8, 10,
-  11, Mac OS Clássico, macOS Moderno e Ubuntu (cores, gradientes, cantos,
-  estilo dos botões e família de ícones: Fluent nos Windows, Cupertino nos
-  Mac, Material no Ubuntu; não são réplicas pixel-perfect). Temas "de vidro"
-  (Vista, 7 Aero, 10, macOS Moderno) ativam transparência real da janela
-  (blur via NSVisualEffectView). A escolha fica salva em
-  `~/.video_toolkit/theme.txt`.
-- **Barra de menus nativa**: Arquivo (Abrir ⌘O, Salvar ⌘S, adicionar
-  áudio/legenda), Temas e Ajuda.
+Video Toolkit gives you an NLE-style workspace — track list, video preview,
+properties panel and a zoomable timeline — for the kind of surgery media
+players can't do and full video editors make painful: swapping dub tracks,
+fixing audio sync, stitching the good half of one track onto the other,
+attaching subtitles, and exporting audio — all while the video stream is
+copied bit-for-bit.
 
-- **Layout de editor de vídeo**: lista de faixas à esquerda, preview do vídeo
-  no centro, propriedades à direita e linha do tempo na parte inferior, com
-  playhead, régua, zoom e campo "ir para" (aceita `90`, `1:30`, `1:02:03.5`).
-- **Preview com reprodução** (via [media_kit](https://pub.dev/packages/media_kit)/libmpv,
-  toca MKV e MP4): play/pause (espaço), −5s/+5s, playhead sincronizado com a
-  linha do tempo. Dá para escolher qual faixa de áudio ouvir (inclusive
-  arquivos externos adicionados); o deslocamento do trecho monitorado é
-  aplicado em tempo real via `audio-delay` do mpv — bom para acertar a
-  posição das falas. (Aproximação: cortes/mesclas multi-trecho só são
-  ouvidos exatamente no arquivo salvo.)
-- **Dividir e excluir trechos de áudio**: posicione o playhead, selecione a
-  faixa/trecho e use *Dividir* (tecla **S**) / *Excluir trecho*
-  (**Del/Backspace** — sem trecho selecionado, remove a faixa inteira).
-  Cada faixa de áudio é uma sequência de trechos arrastáveis na linha do
-  tempo (com snap no playhead e nas bordas vizinhas). **Espaço** dá
-  play/pause.
-- **Automesclagem ao salvar**: faixas de áudio que foram cortadas
-  (divididas/aparadas) são mescladas automaticamente em uma única faixa de
-  saída, na posição em que estão na linha do tempo — ex.: os 3 primeiros
-  minutos do áudio 1 seguidos do restante do áudio 2. Faixas intactas ou
-  apenas deslocadas continuam como faixas separadas. As lanes que serão
-  mescladas mostram um ícone no cabeçalho, e o diálogo de salvar lista a
-  mesclagem antes de executar.
-- Adicionar faixas de áudio externas (`mp3`, `aac`, `m4a`, `ac3`, `eac3`,
-  `flac`, `wav`, `opus`, `ogg`, `dts`, `mka`) e legendas (`srt`, `ass`,
-  `ssa`, `vtt`, `sub`).
-- Remover/restaurar faixas, renomear título de qualquer faixa, deslocar
-  legendas no tempo.
-- Exportar uma faixa de áudio original sem perda (extensão escolhida pelo
-  codec: AAC → `.m4a`, MP3 → `.mp3` etc.).
-- Salvar em `.mkv` ou `.mp4` com barra de progresso.
+![Video Toolkit — dark theme](docs/screenshots/editor-dark.png)
 
-## Como o arquivo é gerado
+<details>
+<summary>More screenshots</summary>
 
-Tudo via `ffprobe`/`ffmpeg` como processos externos
-([lib/services/ffmpeg_service.dart](lib/services/ffmpeg_service.dart)):
+![Video Toolkit — Aero theme](docs/screenshots/editor-aero.png)
 
-- Faixas **intactas** são copiadas sem re-encode (`-c copy`; atraso puro vira
-  `-itsoffset`, corte só do início vira `-ss`).
-- Faixas **editadas** (divididas, cortadas ou mescladas) passam por
-  `-filter_complex` (`atrim` → `asetpts` → `aresample` → `adelay` → `amix`)
-  e são re-encodadas em AAC 256k; as demais continuam em cópia direta.
-- Legendas `srt` viram `mov_text` em MP4; áudio incompatível com MP4 vira AAC.
+</details>
 
-## Requisitos
+## Features
 
-- macOS
-- [Flutter](https://flutter.dev)
-- FFmpeg: `brew install ffmpeg` (procurado em `/opt/homebrew/bin`,
-  `/usr/local/bin`, `/usr/bin`)
+- **Track management** — list every video, audio and subtitle track with
+  codec, language and channel details; add external audio (`mp3`, `aac`,
+  `m4a`, `ac3`, `eac3`, `flac`, `wav`, `opus`, `ogg`, `dts`, `mka`) and
+  subtitle files (`srt`, `ass`, `ssa`, `vtt`, `sub`); remove, restore and
+  rename tracks; export any audio track losslessly.
+- **Timeline editing** — split audio tracks into segments, delete pieces,
+  drag them along a zoomable timeline with playhead snapping, or type exact
+  times (`90`, `1:30`, `1:02:03.5`).
+- **Auto-merge on save** — tracks that were cut apart are automatically
+  mixed into a single output track at their timeline positions (e.g. the
+  first 3 minutes of track 1 followed by the rest of track 2). Untouched or
+  merely delayed tracks stay separate.
+- **Built-in preview** — video playback powered by
+  [media_kit](https://pub.dev/packages/media_kit)/libmpv (plays MKV
+  natively), synced with the timeline playhead. Choose which audio track to
+  monitor — including external files — with segment shifts applied live,
+  which makes dialogue syncing fast.
+- **Lossless by default** — video is always stream-copied. Untouched audio
+  is copied too (pure delays use `-itsoffset`, head trims use `-ss`); only
+  edited audio lanes are re-encoded (AAC 256k) through an ffmpeg filter
+  graph (`atrim` → `asetpts` → `aresample` → `adelay` → `amix`).
+- **Safe saving** — output is always rendered to a temporary file and moved
+  into place afterwards, so overwriting the source can never corrupt it.
+  Container incompatibilities (e.g. image-based subtitles into MP4) are
+  detected and confirmed before anything runs.
+- **10 themes** — looks inspired by Windows 98 / XP / Vista / 7 (Aero) /
+  8 / 10 / 11, classic and modern macOS, and Ubuntu. Each theme swaps
+  colors, corner radii, button styles and the icon family (Fluent, Cupertino
+  or Material); glass themes enable real window translucency on macOS.
+- **Desktop-first** — landscape-only layout, native macOS menu bar with
+  shortcuts, keyboard-driven editing.
 
-## Rodando
+## Download
+
+Grab the latest build from the
+[Releases page](https://github.com/omanoloneto/video-toolkit/releases):
+
+| Platform | File | Notes |
+| --- | --- | --- |
+| macOS | `VideoToolkit-<version>-macos.zip` | Unzip, drag to Applications. First launch: right-click → Open (unsigned build). |
+| Windows | `VideoToolkit-<version>-windows.zip` | Unzip anywhere, run `video_toolkit.exe`. |
+| Linux (Debian/Ubuntu) | `video-toolkit_<version>_amd64.deb` | `sudo apt install ./video-toolkit_<version>_amd64.deb` |
+
+**FFmpeg is required on every platform** — Video Toolkit drives `ffmpeg` and
+`ffprobe` under the hood:
 
 ```sh
-flutter run -d macos
+# macOS            # Windows                # Debian/Ubuntu
+brew install ffmpeg  winget install ffmpeg    sudo apt install ffmpeg
 ```
 
-Ou gere o app (aceita um vídeo como argumento):
+The `.deb` package already declares FFmpeg as a dependency.
+
+## Keyboard shortcuts
+
+| Key | Action |
+| --- | --- |
+| `Space` | Play / pause the preview |
+| `S` | Split the selected track's segment at the playhead |
+| `Delete` / `Backspace` | Delete the selected segment (or the whole selected track) |
+| `⌘O` | Open a video (macOS menu bar) |
+| `⌘S` | Save (macOS menu bar) |
+
+## How saving works
+
+Everything is delegated to FFmpeg as an external process — the app builds a
+single command per save:
+
+1. **Untouched tracks** are mapped with `-c copy` (bit-perfect remux).
+2. **Whole-track shifts** stay on the copy path: positive delays become
+   `-itsoffset`, head trims become `-ss` on a duplicate input.
+3. **Edited lanes** (split / trimmed / merged) are assembled with
+   `-filter_complex`: each segment is `atrim`-ed, re-timed and `adelay`-ed
+   to its timeline position, then all segments are mixed with `amix` and
+   encoded to AAC.
+4. Subtitles are converted when the target container demands it (`srt` →
+   `mov_text` for MP4, exotic text formats → `srt` for MKV); image-based
+   subtitles that cannot exist in MP4 are dropped with an explicit warning.
+   MKV outputs also keep font attachments so ASS subtitles render correctly.
+
+## Building from source
+
+Requirements: [Flutter](https://flutter.dev) (stable channel) and FFmpeg.
 
 ```sh
+git clone https://github.com/omanoloneto/video-toolkit.git
+cd video-toolkit
+flutter pub get
+
+# run in debug
+flutter run -d macos      # or -d windows / -d linux
+
+# release build (the app also accepts a video path as CLI argument)
 flutter build macos --release
-open "build/macos/Build/Products/Release/Video Toolkit.app" --args /caminho/video.mkv
+open "build/macos/Build/Products/Release/Video Toolkit.app" --args ~/movie.mkv
 ```
 
-## Testes
+Platform notes:
+
+- **macOS** — the App Sandbox is disabled in the entitlements so the app can
+  execute FFmpeg and read arbitrary files. Window translucency uses
+  `macos_window_utils` (NSVisualEffectView).
+- **Linux** — needs the usual Flutter desktop toolchain plus
+  `libgtk-3-dev` and `libmpv-dev`.
+- **Windows** — Visual Studio C++ workload, per standard Flutter setup.
+
+Releases for all three platforms are produced by the GitHub Actions workflow
+in [.github/workflows/release.yml](.github/workflows/release.yml), triggered
+by pushing a `v*` tag.
+
+## Tests
 
 ```sh
-flutter test          # unit + widget (inclui montagem dos args do ffmpeg)
-dart run tool/e2e.dart  # end-to-end com ffmpeg real (gera mídia, salva, valida conteúdo)
+flutter test            # unit + widget tests (ffmpeg command assembly, timeline, themes)
+dart run tool/e2e.dart  # end-to-end against a real ffmpeg: generates media,
+                        # saves through the app's pipeline and verifies the
+                        # output content (stream counts, durations, which
+                        # audio plays before/after a cut)
 ```
 
-O App Sandbox do macOS está desativado nos entitlements para permitir
-executar o FFmpeg e ler arquivos arbitrários.
+## Project layout
 
-As artes-fonte do ícone ficam em [assets/icon/](assets/icon/); os tamanhos do
-ícone macOS foram gerados a partir de `icon.png` (via `sips`) em
-`macos/Runner/Assets.xcassets/AppIcon.appiconset/`.
+```
+lib/
+  models/tracks.dart          # tracks, audio segments, split/merge rules
+  services/ffmpeg_service.dart# probing + ffmpeg command construction
+  screens/editor_screen.dart  # app shell, menu bar, playback state
+  widgets/timeline_panel.dart # timeline: lanes, clips, ruler, playhead
+  widgets/preview_panel.dart  # video preview + audio monitoring
+  widgets/properties_panel.dart
+  theme/app_themes.dart       # the 10 theme definitions
+  theme/theme_icons.dart      # Fluent / Cupertino / Material icon sets
+tool/e2e.dart                 # real-ffmpeg end-to-end checks
+assets/icon/                  # icon source art
+```
+
+The theme choice is persisted to `~/.video_toolkit/theme.txt`.
+
+## License
+
+[MIT](LICENSE)

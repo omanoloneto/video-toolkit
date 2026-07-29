@@ -1,45 +1,105 @@
-# Miscellaneous
-*.class
-*.log
-*.pyc
-*.swp
-.DS_Store
-.atom/
-.build/
-.buildlog/
-.history
-.svn/
-.swiftpm/
-migrate_working_dir/
+# ----------------------------------------------------------------------------
+# Video Toolkit — .gitignore
+# ----------------------------------------------------------------------------
 
-# IntelliJ related
+# --- Operating system junk ---------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+*.lnk
+
+# --- IDEs and editors --------------------------------------------------------
+.idea/
 *.iml
 *.ipr
 *.iws
-.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.swp
+*.swo
+*~
+.history/
+.atom/
+.svn/
+.buildlog/
 
-# The .vscode folder contains launch configuration and tasks you configure in
-# VS Code which you may wish to be included in version control, so this line
-# is commented out by default.
-#.vscode/
-
-# Flutter/Dart/Pub related
-**/doc/api/
-**/ios/Flutter/.last_build_id
+# --- Dart / Flutter ----------------------------------------------------------
 .dart_tool/
-.flutter-plugins-dependencies
+.packages
 .pub-cache/
 .pub/
 /build/
 /coverage/
-
-# Symbolication related
+**/doc/api/
+.flutter-plugins
+.flutter-plugins-dependencies
 app.*.symbols
-
-# Obfuscation related
 app.*.map.json
+migrate_working_dir/
 
-# Android Studio will place build artifacts here
-/android/app/debug
-/android/app/profile
-/android/app/release
+# Flutter version managers
+.fvm/
+.fvmrc.local
+
+# --- macOS (Xcode / CocoaPods) -----------------------------------------------
+macos/Pods/
+macos/Flutter/ephemeral/
+.swiftpm/
+**/xcuserdata/
+**/DerivedData/
+*.moved-aside
+*.pbxuser
+!default.pbxuser
+*.mode1v3
+!default.mode1v3
+*.mode2v3
+!default.mode2v3
+*.perspectivev3
+!default.perspectivev3
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# --- Windows -----------------------------------------------------------------
+windows/flutter/ephemeral/
+
+# --- Linux -------------------------------------------------------------------
+linux/flutter/ephemeral/
+
+# --- Logs, temp and local scratch --------------------------------------------
+*.log
+*.tmp
+*.temp
+*.bak
+*.orig
+*.class
+*.pyc
+.env
+.env.*
+!.env.example
+TEMP/
+tmp/
+
+# --- Media files (keep test fixtures out of the repo) ------------------------
+*.mkv
+*.mp4
+*.m4a
+*.aac
+*.ac3
+*.eac3
+*.flac
+*.wav
+*.opus
+*.ogg
+*.mka
+*.srt
+*.ass
+*.vtt
