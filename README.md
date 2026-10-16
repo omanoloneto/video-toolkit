@@ -65,7 +65,7 @@ Grab the latest build from the
 
 | Platform | File | Notes |
 | --- | --- | --- |
-| macOS | `VideoToolkit-<version>-macos.zip` | Unzip, drag to Applications. First launch: right-click → Open (unsigned build). |
+| macOS | `VideoToolkit-<version>-macos.zip` | Unzip, drag to Applications. The build is not notarized, so macOS blocks it on first launch — see [Opening on macOS](#opening-on-macos). |
 | Windows | `VideoToolkit-<version>-windows.zip` | Unzip anywhere, run `video_toolkit.exe`. |
 | Linux (Debian/Ubuntu) | `video-toolkit_<version>_amd64.deb` | `sudo apt install ./video-toolkit_<version>_amd64.deb` |
 
@@ -78,6 +78,22 @@ brew install ffmpeg  winget install ffmpeg    sudo apt install ffmpeg
 ```
 
 The `.deb` package already declares FFmpeg as a dependency.
+
+### Opening on macOS
+
+Release builds are ad-hoc signed, not notarized. Since macOS 15 the old
+right-click → Open trick is gone and macOS refuses to run a downloaded copy.
+Allow it once, either way:
+
+- **System Settings → Privacy & Security**, scroll to the message about
+  Video Toolkit and click **Open Anyway**; or
+- remove the download quarantine in Terminal:
+
+  ```sh
+  xattr -dr com.apple.quarantine "/Applications/Video Toolkit.app"
+  ```
+
+Builds you compile yourself (`flutter build macos`) are never quarantined.
 
 ## Keyboard shortcuts
 

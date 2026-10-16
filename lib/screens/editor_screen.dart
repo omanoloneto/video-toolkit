@@ -12,6 +12,7 @@ import '../models/tracks.dart';
 import '../services/ffmpeg_service.dart';
 import '../theme/app_themes.dart';
 import '../theme/theme_icons.dart';
+import '../widgets/editor_keyboard.dart';
 import '../widgets/preview_panel.dart';
 import '../widgets/properties_panel.dart';
 import '../widgets/timeline_panel.dart';
@@ -43,6 +44,7 @@ class _EditorScreenState extends State<EditorScreen> {
   bool _isPlaying = false;
   double _playhead = 0;
   Object? _monitorLane;
+  double? _appliedDelay;
 
   @override
   void initState() {
@@ -92,7 +94,16 @@ class _EditorScreenState extends State<EditorScreen> {
   Future<void> _initPlayer(String path) async {
     await _positionSub?.cancel();
     await _playingSub?.cancel();
-    await _player?.dispose();
+    final old = _player;
+    if (mounted) {
+      setState(() {
+        _player = null;
+        _videoController = null;
+        _isPlaying = false;
+      });
+    }
+    _appliedDelay = null;
+    await old?.dispose();
 
     final player = Player();
     final controller = VideoController(player);
@@ -103,6 +114,7 @@ class _EditorScreenState extends State<EditorScreen> {
       // the player via _onScrub instead.
       if (mounted && _isPlaying) {
         setState(() => _playhead = pos.inMilliseconds / 1000);
+        _syncAudioDelay();
       }
     });
     _playingSub = player.stream.playing.listen((playing) {
@@ -176,10 +188,25 @@ class _EditorScreenState extends State<EditorScreen> {
           segments.first;
       delay = seg.timelineStart - seg.sourceStart;
     }
+    final applied = _appliedDelay;
+    if (applied != null && (applied - delay).abs() < 0.0005) return;
     final platform = player.platform;
     if (platform is NativePlayer) {
+      _appliedDelay = delay;
       platform.setProperty('audio-delay', delay.toStringAsFixed(3));
     }
+  }
+
+  void _forgetMonitor(Object lane) {
+    if (identical(_monitorLane, lane)) _setMonitorLane(null);
+  }
+
+  void _removeExternal(ExternalTrack track) {
+    setState(() {
+      _added.remove(track);
+      if (identical(_selection?.lane, track)) _selection = null;
+    });
+    _forgetMonitor(track);
   }
 
   List<MonitorOption> _monitorOptions() {
@@ -255,6 +282,7 @@ class _EditorScreenState extends State<EditorScreen> {
       if (lane is MediaTrack) lane.removed = true;
       if (lane is ExternalTrack) _added.remove(lane);
     });
+    _forgetMonitor(lane);
   }
 
   void _deleteSegment(Object lane, AudioSegment segment) {
@@ -352,11 +380,16 @@ class _EditorScreenState extends State<EditorScreen> {
     if (outputPath == null) return;
 
     setState(() => _loading = true);
-    final result = await _ffmpeg.exportAudioTrack(
-      sourcePath: file.path,
-      audioTypeIndex: track.typeIndex,
-      outputPath: outputPath,
-    );
+    FfmpegRunResult result;
+    try {
+      result = await _ffmpeg.exportAudioTrack(
+        sourcePath: file.path,
+        audioTypeIndex: track.typeIndex,
+        outputPath: outputPath,
+      );
+    } catch (e) {
+      result = FfmpegRunResult(exitCode: -1, stderr: e.toString());
+    }
     if (!mounted) return;
     setState(() => _loading = false);
 
@@ -381,6 +414,8 @@ class _EditorScreenState extends State<EditorScreen> {
         ));
     if (outputPath == null) return;
 
+    // salvar por cima do original muda o arquivo que o editor descreve
+    final replacesSource = await isSameFile(outputPath, file.path);
     final warnings = _ffmpeg.saveWarnings(
         source: file, added: _added, outputPath: outputPath);
     if (warnings.isNotEmpty && mounted) {
@@ -430,26 +465,37 @@ class _EditorScreenState extends State<EditorScreen> {
       ),
     );
 
-    final result = await _ffmpeg.save(
-      source: file,
-      added: _added,
-      outputPath: outputPath,
-      onProgress: (v) => progress.value = v,
-    );
+    FfmpegRunResult result;
+    try {
+      result = await _ffmpeg.save(
+        source: file,
+        added: _added,
+        outputPath: outputPath,
+        onProgress: (v) => progress.value = v,
+      );
+    } catch (e) {
+      result = FfmpegRunResult(exitCode: -1, stderr: e.toString());
+    }
 
     if (!mounted) return;
     Navigator.of(context, rootNavigator: true).pop();
 
-    if (result.success) {
-      _showInfo('Vídeo salvo em ${p.basename(outputPath)}');
-    } else {
+    if (!result.success) {
       _showError('Falha ao salvar o vídeo', result.errorTail);
+      return;
+    }
+    if (replacesSource) {
+      await _loadFile(file.path);
+      _showInfo('Vídeo salvo e reaberto com as alterações');
+    } else {
+      _showInfo('Vídeo salvo em ${p.basename(outputPath)}');
     }
   }
 
   // ------------------------------------------------------------------- ui
 
   void _showInfo(String message) {
+    if (!mounted) return;
     displayInfoBar(
       context,
       builder: (context, close) => InfoBar(
@@ -753,13 +799,7 @@ class _EditorScreenState extends State<EditorScreen> {
     );
   }
 
-  KeyEventResult _handleKey(FocusNode node, KeyEvent event) {
-    if (event is! KeyDownEvent) return KeyEventResult.ignored;
-    final focusedContext = FocusManager.instance.primaryFocus?.context;
-    final typing = focusedContext?.widget is EditableText ||
-        focusedContext?.findAncestorWidgetOfExactType<EditableText>() != null;
-    if (typing) return KeyEventResult.ignored;
-
+  KeyEventResult _handleKey(KeyEvent event) {
     final key = event.logicalKey;
     if (key == LogicalKeyboardKey.space) {
       _togglePlay();
@@ -817,10 +857,7 @@ class _EditorScreenState extends State<EditorScreen> {
       return true;
     }
     if (lane is ExternalTrack) {
-      setState(() {
-        _added.remove(lane);
-        _selection = null;
-      });
+      _removeExternal(lane);
       return true;
     }
     return false;
@@ -853,13 +890,13 @@ class _EditorScreenState extends State<EditorScreen> {
         if (identical(_selection?.lane, track)) _selection = null;
       }
     });
+    if (track.removed) _forgetMonitor(track);
   }
 
   Widget _buildEditor(FluentThemeData theme) {
     final file = _file!;
-    return Focus(
-      autofocus: true,
-      onKeyEvent: _handleKey,
+    return EditorKeyboard(
+      onKey: _handleKey,
       child: Stack(
         children: [
           Column(
@@ -897,12 +934,7 @@ class _EditorScreenState extends State<EditorScreen> {
                         onModelChanged: _onTimelineModelChanged,
                         onExportAudio: _exportAudio,
                         onToggleRemoved: _toggleRemoved,
-                        onRemoveExternal: (track) => setState(() {
-                          _added.remove(track);
-                          if (identical(_selection?.lane, track)) {
-                            _selection = null;
-                          }
-                        }),
+                        onRemoveExternal: _removeExternal,
                         onDeleteSegment: _deleteSegment,
                       ),
                     ),
@@ -1177,10 +1209,7 @@ class _EditorScreenState extends State<EditorScreen> {
             message: 'Remover',
             child: IconButton(
               icon: Icon(ThemeIcons.of(context).delete, size: 13),
-              onPressed: () => setState(() {
-                _added.remove(track);
-                if (identical(_selection?.lane, track)) _selection = null;
-              }),
+              onPressed: () => _removeExternal(track),
             ),
           ),
         ],

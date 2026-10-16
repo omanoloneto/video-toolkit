@@ -53,6 +53,18 @@ class _AudioLaneDesc {
       );
 }
 
+/// Os dois caminhos apontam pro mesmo arquivo (mesmo escrito diferente:
+/// APFS ignora maiúsculas, /tmp é link).
+Future<bool> isSameFile(String a, String b) async {
+  if (p.equals(p.normalize(a), p.normalize(b))) return true;
+  try {
+    if (!await File(a).exists() || !await File(b).exists()) return false;
+    return await FileSystemEntity.identical(a, b);
+  } on FileSystemException {
+    return false;
+  }
+}
+
 class SaveArgsResult {
   SaveArgsResult({
     required this.args,
@@ -678,12 +690,28 @@ class FfmpegService {
     );
 
     if (result.success) {
-      await File(tempOutput).rename(outputPath);
-    } else {
-      final tmp = File(tempOutput);
-      if (await tmp.exists()) await tmp.delete();
+      try {
+        await File(tempOutput).rename(outputPath);
+        return result;
+      } on FileSystemException catch (e) {
+        await _deleteQuietly(tempOutput);
+        return FfmpegRunResult(
+            exitCode: -1,
+            stderr: 'Não foi possível gravar ${p.basename(outputPath)}: '
+                '${e.osError?.message ?? e.message}');
+      }
     }
+    await _deleteQuietly(tempOutput);
     return result;
+  }
+
+  static Future<void> _deleteQuietly(String path) async {
+    try {
+      final file = File(path);
+      if (await file.exists()) await file.delete();
+    } on FileSystemException {
+      // sobra um arquivo oculto .saving; não vale esconder o erro original
+    }
   }
 
   Future<FfmpegRunResult> _run(
@@ -700,7 +728,13 @@ class FfmpegService {
       args.last,
     ];
 
-    final process = await Process.start(ffmpegPath!, fullArgs);
+    final Process process;
+    try {
+      process = await Process.start(ffmpegPath!, fullArgs);
+    } on ProcessException catch (e) {
+      return FfmpegRunResult(
+          exitCode: -1, stderr: 'Não foi possível executar o FFmpeg: ${e.message}');
+    }
     final stderrBuffer = StringBuffer();
 
     process.stdout

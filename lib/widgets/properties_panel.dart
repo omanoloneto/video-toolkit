@@ -87,21 +87,27 @@ class _PropertiesPanelState extends State<PropertiesPanel> {
 
     if (sel == null) {
       return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(ThemeIcons.of(context).select, size: 32,
-                color: theme.resources.textFillColorTertiary),
-            const SizedBox(height: 12),
-            Text('Selecione uma faixa ou um trecho',
-                style: theme.typography.bodyStrong),
-            const SizedBox(height: 4),
-            Text(
-              'Clique em uma faixa na lista ou em um trecho na linha do tempo.',
-              style: TextStyle(
-                  color: theme.resources.textFillColorSecondary, fontSize: 12),
-            ),
-          ],
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(ThemeIcons.of(context).select, size: 32,
+                  color: theme.resources.textFillColorTertiary),
+              const SizedBox(height: 12),
+              Text('Selecione uma faixa ou um trecho',
+                  style: theme.typography.bodyStrong,
+                  textAlign: TextAlign.center),
+              const SizedBox(height: 4),
+              Text(
+                'Clique em uma faixa na lista ou em um trecho na linha do tempo.',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                    color: theme.resources.textFillColorSecondary,
+                    fontSize: 12),
+              ),
+            ],
+          ),
         ),
       );
     }
