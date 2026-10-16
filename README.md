@@ -34,10 +34,13 @@ copied bit-for-bit.
 - **Timeline editing** — split audio tracks into segments, delete pieces,
   drag them along a zoomable timeline with playhead snapping, or type exact
   times (`90`, `1:30`, `1:02:03.5`).
-- **Auto-merge on save** — tracks that were cut apart are automatically
+- **Merge on save** — tracks that were cut apart are automatically
   mixed into a single output track at their timeline positions (e.g. the
   first 3 minutes of track 1 followed by the rest of track 2). Untouched or
-  merely delayed tracks stay separate.
+  merely delayed tracks stay separate. The merge button on each audio lane
+  (or the checkbox in the properties panel) overrides that: include a whole
+  track — say, an opening song placed before the dub — or keep a cut one
+  separate.
 - **Built-in preview** — video playback powered by
   [media_kit](https://pub.dev/packages/media_kit)/libmpv (plays MKV
   natively), synced with the timeline playhead. Choose which audio track to

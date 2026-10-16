@@ -134,6 +134,29 @@ void main() {
         closeTo(audio.segments[0].timelineEnd, 0.001));
   });
 
+  testWidgets('the merge button of a lane includes or excludes it',
+      (tester) async {
+    await useDesktopSurface(tester);
+    final audio = _audio(0);
+    final file = _file([audio]);
+
+    await tester.pumpWidget(_wrap(
+      file: file,
+      selection: null,
+      onSelectionChanged: (_) {},
+    ));
+
+    expect(audioLaneMerges(audio, file.path), isFalse);
+    await tester.tap(find.byKey(const ValueKey('merge-Faixa 0')));
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(audio.merge, isTrue);
+    expect(audioLaneMerges(audio, file.path), isTrue);
+
+    await tester.tap(find.byKey(const ValueKey('merge-Faixa 0')));
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(audio.merge, isFalse);
+  });
+
   test('parseTimelineTime handles the common formats', () {
     expect(parseTimelineTime('90'), 90);
     expect(parseTimelineTime('1:30'), 90);

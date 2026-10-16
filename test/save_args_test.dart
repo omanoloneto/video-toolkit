@@ -108,7 +108,7 @@ void main() {
       final filter = args.args[args.args.indexOf('-filter_complex') + 1];
       expect(filter, contains('atrim=start=60.000:end=300.000'));
       expect(filter, contains('adelay=30000:all=1'));
-      expect(filter, contains('anull[lane0]'));
+      expect(filter, contains('asetpts=N/SR/TB[lane0]'));
     });
 
     test('whole-track delay keeps stream copy via -itsoffset', () {
@@ -313,6 +313,63 @@ void main() {
       expect(RegExp(r'-map \[lane').allMatches(joined).length, 1);
       expect(joined, contains('-map 0:a:2'));
       expect(joined, contains('-itsoffset 2.000 -i /tmp/dub.mp3'));
+    });
+
+    test('a whole song marked to merge fills the gap of a cut track', () {
+      // Abertura inteira no começo, a dublagem cortada depois dela.
+      final dub = _audio(1, 0)
+        ..segments.single.sourceStart = 90
+        ..segments.single.timelineStart = 90;
+      final opening = ExternalTrack(
+        path: '/tmp/abertura.mp3',
+        type: TrackType.audio,
+        codec: 'MP3',
+        details: '',
+        title: 'Abertura',
+        durationSeconds: 84,
+        channelLayout: 'stereo',
+      )..merge = true;
+      opening.segments.add(AudioSegment(
+        source: const AudioSource(path: '/tmp/abertura.mp3', audioTypeIndex: 0),
+        sourceStart: 0,
+        sourceEnd: 84,
+        timelineStart: 0,
+      ));
+
+      final result = service.buildSaveArgs(
+        source: _file([_video(), dub]),
+        added: [opening],
+        outputPath: '/tmp/out.mkv',
+      );
+      final joined = result.args.join(' ');
+      final filter = result.args[result.args.indexOf('-filter_complex') + 1];
+
+      expect(RegExp(r'-map \[lane').allMatches(joined).length, 1);
+      expect(joined, isNot(contains('-map 2:a:0')));
+      expect(filter, contains('[1:a:0]atrim=start=0.000:end=84.000'));
+      expect(filter,
+          contains('amix=inputs=2:duration=longest:normalize=0,asetpts=N/SR/TB'));
+      expect(result.warnings.single, contains('"Abertura"'));
+    });
+
+    test('a cut track marked to stay separate keeps its own track', () {
+      final a1 = _audio(1, 0)..segments.single.sourceEnd = 180;
+      final a2 = _audio(2, 1)
+        ..segments.single.sourceStart = 180
+        ..segments.single.timelineStart = 180
+        ..merge = false;
+
+      final result = service.buildSaveArgs(
+        source: _file([_video(), a1, a2]),
+        added: [],
+        outputPath: '/tmp/out.mkv',
+      );
+      final filter = result.args[result.args.indexOf('-filter_complex') + 1];
+
+      expect(filter, isNot(contains('amix')));
+      expect(RegExp(r'-map \[lane').allMatches(result.args.join(' ')).length,
+          2);
+      expect(result.warnings, isEmpty);
     });
   });
 

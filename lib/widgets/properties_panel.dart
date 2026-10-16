@@ -274,6 +274,7 @@ class _PropertiesPanelState extends State<PropertiesPanel> {
       _ => (ThemeIcons.of(context).help, '?', '', null, 0.0, false, false),
     };
 
+    final merges = audioLaneMerges(lane, widget.file.path);
     children.addAll([
       _header(theme, icon, _laneDisplayName(lane)),
       InfoLabel(
@@ -298,6 +299,20 @@ class _PropertiesPanelState extends State<PropertiesPanel> {
 
     if (lane is ExternalTrack) {
       children.add(_infoRow(theme, 'Arquivo', lane.path));
+    }
+    if (isAudio) {
+      children.add(Padding(
+        padding: const EdgeInsets.only(top: 6, bottom: 4),
+        child: Checkbox(
+          checked: merges,
+          onChanged: (value) {
+            if (lane is MediaTrack) lane.merge = value ?? false;
+            if (lane is ExternalTrack) lane.merge = value ?? false;
+            widget.onModelChanged();
+          },
+          content: const Text('Mesclar com as outras faixas ao salvar'),
+        ),
+      ));
     }
     if (isSubtitle) {
       final offset = switch (lane) {

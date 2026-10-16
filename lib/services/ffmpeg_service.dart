@@ -33,6 +33,7 @@ class _AudioLaneDesc {
     required this.title,
     required this.language,
     required this.displayName,
+    required this.merge,
   });
 
   final List<AudioSegment> segments;
@@ -44,8 +45,11 @@ class _AudioLaneDesc {
   final String title;
   final String? language;
   final String displayName;
+  final bool? merge;
 
-  bool get fragmentary => audioLaneIsFragmentary(
+  bool get merges =>
+      merge ??
+      audioLaneIsFragmentary(
         segments: segments,
         ownPath: ownPath,
         ownTypeIndex: ownTypeIndex,
@@ -358,7 +362,7 @@ class FfmpegService {
     final inputArgs = <String>[];
     final inputKeys = <String>[];
     int inputFor(String path, {List<String> flags = const []}) {
-      final key = '${flags.join(' ')}|$path';
+      final key = '${flags.join('\u0000')}|$path';
       final existing = inputKeys.indexOf(key);
       if (existing != -1) return existing;
       inputKeys.add(key);
@@ -456,12 +460,15 @@ class FfmpegService {
           labels.add(label);
         }
         final laneLabel = 'lane$laneCounter';
+        // FFmpeg 9: amix cujo primeiro trecho começa atrasado (adelay) sai com
+        // timestamps inválidos e o arquivo fica com duração "infinita"
+        const retime = 'asetpts=N/SR/TB';
         if (labels.length == 1) {
-          filterChains.add('[${labels.single}]anull[$laneLabel]');
+          filterChains.add('[${labels.single}]$retime[$laneLabel]');
         } else {
           filterChains.add(
               '${labels.map((l) => '[$l]').join()}amix=inputs=${labels.length}'
-              ':duration=longest:normalize=0[$laneLabel]');
+              ':duration=longest:normalize=0,$retime[$laneLabel]');
         }
         mapArgs.addAll(['-map', '[$laneLabel]']);
         codecArgs.addAll(['-c:a:$outAudio', 'aac', '-b:a:$outAudio', '256k']);
@@ -513,6 +520,7 @@ class FfmpegService {
           displayName: track.title.isNotEmpty
               ? track.title
               : 'Áudio ${track.typeIndex + 1}',
+          merge: track.merge,
         ),
       for (final track in added.where((t) => t.type == TrackType.audio))
         _AudioLaneDesc(
@@ -525,17 +533,18 @@ class FfmpegService {
           title: track.title,
           language: track.language,
           displayName: track.title,
+          merge: track.merge,
         ),
     ];
 
-    final fragmentary = laneDescs.where((d) => d.fragmentary).toList();
-    final autoMerge = fragmentary.length >= 2;
+    final merging = laneDescs.where((d) => d.merges).toList();
+    final autoMerge = merging.length >= 2;
     var mergedSegments = const <AudioSegment>[];
     if (autoMerge) {
-      mergedSegments = fragmentary.expand((d) => d.segments).toList()
+      mergedSegments = merging.expand((d) => d.segments).toList()
         ..sort((a, b) => a.timelineStart.compareTo(b.timelineStart));
-      warnings.add('As faixas editadas '
-          '(${fragmentary.map((d) => '"${d.displayName}"').join(', ')}) serão '
+      warnings.add('As faixas '
+          '${merging.map((d) => '"${d.displayName}"').join(', ')} serão '
           'mescladas em uma única faixa de áudio, na posição em que estão na '
           'linha do tempo.');
       for (var i = 1; i < mergedSegments.length; i++) {
@@ -551,10 +560,10 @@ class FfmpegService {
     var laneCursor = 0;
     void emitNextAudioLane() {
       final desc = laneDescs[laneCursor++];
-      if (autoMerge && desc.fragmentary) {
-        // The merged track takes the slot of the first fragmentary lane;
+      if (autoMerge && desc.merges) {
+        // The merged track takes the slot of the first merging lane;
         // the others contribute their segments and emit nothing.
-        if (!identical(desc, fragmentary.first)) return;
+        if (!identical(desc, merging.first)) return;
         addAudioLane(
           segments: mergedSegments,
           ownPath: desc.ownPath,

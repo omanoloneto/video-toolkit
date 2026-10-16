@@ -104,6 +104,36 @@ Future<void> main() async {
           (rawEarly - rawLate).abs() < 6,
           'early=${rawEarly.toStringAsFixed(1)}dB late=${rawLate.toStringAsFixed(1)}dB');
     }
+
+    // -------------------------------------------------- merge with a leading gap
+    // o primeiro trecho começa depois do zero: o FFmpeg 9 quebrava os
+    // timestamps e o arquivo saía com duração "infinita"
+    info = await service.probe(src);
+    final g1 = info.byType(TrackType.audio)[0];
+    final g2 = info.byType(TrackType.audio)[1];
+    splitSegment(g1.segments, g1.segments.single, 1);
+    splitSegment(g1.segments, g1.segments[1], 3);
+    g1.segments
+      ..removeAt(2)
+      ..removeAt(0);
+    splitSegment(g2.segments, g2.segments.single, 3);
+    g2.segments.removeAt(0);
+
+    final gapOut = '${dir.path}/gap.mkv';
+    result = await service.save(source: info, added: [], outputPath: gapOut);
+    check('merge with leading gap succeeds', result.success, result.errorTail);
+    if (result.success) {
+      final gapDuration = await _mediaDuration(service.ffprobePath!, gapOut);
+      check('merge with leading gap keeps a real duration',
+          (gapDuration - 6).abs() < 0.4, gapDuration.toStringAsFixed(2));
+      final silence =
+          await _meanVolume(service.ffmpegPath!, gapOut, 0.1, 0.8, 'anull');
+      final sound =
+          await _meanVolume(service.ffmpegPath!, gapOut, 1.5, 2.5, 'anull');
+      check('merge with leading gap is silent until the first piece',
+          sound - silence > 20,
+          'silence=${silence.toStringAsFixed(1)}dB sound=${sound.toStringAsFixed(1)}dB');
+    }
   } finally {
     await dir.delete(recursive: true);
   }

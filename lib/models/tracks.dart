@@ -50,6 +50,26 @@ class AudioSegment {
 /// fed by another source. Fragmentary lanes are automatically merged into
 /// a single output track on save; whole lanes (even delayed ones) stay as
 /// separate tracks.
+/// Se a faixa de áudio entra na mescla ao salvar: a escolha feita na tela
+/// ou, sem escolha, automático (entra quando foi cortada).
+bool audioLaneMerges(Object lane, String sourcePath) => switch (lane) {
+      final MediaTrack t when t.type == TrackType.audio => t.merge ??
+          audioLaneIsFragmentary(
+            segments: t.segments,
+            ownPath: sourcePath,
+            ownTypeIndex: t.typeIndex,
+            durationSeconds: t.durationSeconds,
+          ),
+      final ExternalTrack t when t.type == TrackType.audio => t.merge ??
+          audioLaneIsFragmentary(
+            segments: t.segments,
+            ownPath: t.path,
+            ownTypeIndex: 0,
+            durationSeconds: t.durationSeconds,
+          ),
+      _ => false,
+    };
+
 bool audioLaneIsFragmentary({
   required List<AudioSegment> segments,
   required String ownPath,
@@ -130,6 +150,9 @@ class MediaTrack {
   /// Audio only: the pieces of this track laid on the output timeline.
   final List<AudioSegment> segments = [];
 
+  /// Áudio: null deixa a mescla automática (ver [audioLaneMerges]).
+  bool? merge;
+
   bool get titleChanged => title != originalTitle;
 }
 
@@ -161,6 +184,9 @@ class ExternalTrack {
 
   /// Audio only.
   final List<AudioSegment> segments = [];
+
+  /// Áudio: null deixa a mescla automática (ver [audioLaneMerges]).
+  bool? merge;
 }
 
 class MediaFileInfo {

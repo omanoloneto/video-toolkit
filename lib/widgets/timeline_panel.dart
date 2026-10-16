@@ -185,12 +185,7 @@ class TimelinePanelState extends State<TimelinePanel> {
                 : 'Áudio ${track.typeIndex + 1}',
             color: theme.accentColor,
             segments: track.segments,
-            fragmentary: audioLaneIsFragmentary(
-              segments: track.segments,
-              ownPath: file.path,
-              ownTypeIndex: track.typeIndex,
-              durationSeconds: track.durationSeconds,
-            ),
+            merges: audioLaneMerges(track, file.path),
           ));
         case TrackType.subtitle:
           lanes.add(_Lane(
@@ -216,12 +211,7 @@ class TimelinePanelState extends State<TimelinePanel> {
           color: theme.accentColor,
           segments: track.segments,
           isExternal: true,
-          fragmentary: audioLaneIsFragmentary(
-            segments: track.segments,
-            ownPath: track.path,
-            ownTypeIndex: 0,
-            durationSeconds: track.durationSeconds,
-          ),
+          merges: audioLaneMerges(track, file.path),
         ));
       } else {
         lanes.add(_Lane(
@@ -323,6 +313,13 @@ class TimelinePanelState extends State<TimelinePanel> {
     setState(() {
       _pps = (current * factor).clamp(lower, upper);
     });
+  }
+
+  void _toggleMerge(_Lane lane) {
+    final ref = lane.ref;
+    if (ref is MediaTrack) ref.merge = !lane.merges;
+    if (ref is ExternalTrack) ref.merge = !lane.merges;
+    widget.onModelChanged();
   }
 
   String _sourceName(AudioSource source) {
@@ -604,12 +601,22 @@ class TimelinePanelState extends State<TimelinePanel> {
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
-                  if (lane.fragmentary)
+                  if (lane.type == TrackType.audio)
                     Tooltip(
-                      message: 'Faixa editada — será mesclada com as outras '
-                          'faixas editadas ao salvar',
-                      child: Icon(ThemeIcons.of(context).merge, size: 11,
-                          color: theme.accentColor),
+                      message: lane.merges
+                          ? 'Entra na mescla ao salvar — clique para deixar '
+                              'separada'
+                          : 'Fica separada ao salvar — clique para mesclar '
+                              'com as outras',
+                      child: IconButton(
+                        key: ValueKey('merge-${lane.label}'),
+                        icon: Icon(ThemeIcons.of(context).merge,
+                            size: 12,
+                            color: lane.merges
+                                ? theme.accentColor
+                                : theme.resources.textFillColorDisabled),
+                        onPressed: () => _toggleMerge(lane),
+                      ),
                     ),
                   if (lane.isExternal)
                     Padding(
@@ -879,7 +886,7 @@ class _Lane {
     this.duration = 0,
     this.offset = 0,
     this.isExternal = false,
-    this.fragmentary = false,
+    this.merges = false,
   });
 
   final Object ref;
@@ -893,9 +900,8 @@ class _Lane {
   final double offset;
   final bool isExternal;
 
-  /// Lane was cut apart — it will be auto-merged with the other
-  /// fragmentary lanes when saving.
-  final bool fragmentary;
+  /// Audio lane goes into the single merged track when saving.
+  final bool merges;
 }
 
 class _RulerPainter extends CustomPainter {
