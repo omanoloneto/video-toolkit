@@ -68,8 +68,8 @@ final class EdlPreview extends PreviewPlan {
   int get hashCode => Object.hash(edl, hasAudio);
 }
 
-/// Ainda falta extrair áudio (ou o silêncio) pra montar a prévia. [missing]
-/// vazio: só falta o silêncio.
+/// Ainda falta extrair áudio (ou fazer o silêncio ou o vídeo preto) pra
+/// montar a prévia. [missing] vazio: só falta o que tapa os vãos.
 final class PendingPreview extends PreviewPlan {
   const PendingPreview(this.missing);
 
@@ -86,21 +86,23 @@ final class PendingPreview extends PreviewPlan {
 }
 
 /// O que a prévia toca ouvindo [monitor]: uma faixa de áudio ou, com null
-/// (ou uma faixa que saiu), a que os players tocam do arquivo salvo. [audioFile] dá a
-/// cópia de cada origem com só aquele áudio e [silenceFile] um silêncio de
-/// [silenceLength] segundos; null enquanto ainda não existem.
+/// (ou uma faixa que saiu), a que os players tocam do arquivo salvo.
+/// [audioFile] dá a cópia de cada origem com só aquele áudio, [silenceFile]
+/// um silêncio de [silenceLength] segundos e [blackFile] um vídeo preto de
+/// [blackLength] segundos, que tapa os vãos da imagem; null enquanto ainda
+/// não existem.
 PreviewPlan buildPreviewPlan({
   required MediaFileInfo file,
   required List<ExternalTrack> added,
   required Object? monitor,
   required String? Function(AudioSource source) audioFile,
   required String? silenceFile,
+  required String? blackFile,
   double silenceLength = 600,
+  double blackLength = 600,
 }) {
-  if (silenceLength.isNaN || silenceLength < _minLength) {
-    throw ArgumentError.value(
-        silenceLength, 'silenceLength', 'must be at least $_minLength');
-  }
+  _checkFillerLength(silenceLength, 'silenceLength');
+  _checkFillerLength(blackLength, 'blackLength');
   final output = _monitoredOutput(file, added, monitor);
   final clips = file.mainVideo?.clips;
   final spans = _audioSpans(
@@ -114,40 +116,51 @@ PreviewPlan buildPreviewPlan({
     if (lane != null) return SourcePreview(file.path, lane.typeIndex + 1);
   }
 
+  final video = _videoEntries(clips ?? const [], blackFile, blackLength);
+  final missing = <AudioSource>{};
+  var silenceMissing = false;
+  final audio = <_Entry>[];
+  for (final (:segment, :from, :to) in spans) {
+    if (segment != null) {
+      final copy = audioFile(segment.source);
+      if (copy == null) {
+        missing.add(segment.source);
+      } else {
+        _append(audio, copy,
+            segment.sourceStart + (from - segment.timelineStart), to - from);
+      }
+    } else if (silenceFile == null) {
+      silenceMissing = true;
+    } else {
+      _appendFiller(audio, silenceFile, to - from, silenceLength);
+    }
+  }
+  if (video == null || missing.isNotEmpty || silenceMissing) {
+    return PendingPreview(missing);
+  }
+
+  // o original dita as faixas do grupo: as legendas dele aparecem na prévia
+  final layout = video.indexWhere((e) => e.path == file.path);
   final lines = [
     '# mpv EDL v0',
-    if (clips != null) ..._videoGroup(clips, file.path),
-  ];
-  if (hasAudio) {
-    final missing = <AudioSource>{};
-    var silenceMissing = false;
-    final entries = <_Entry>[];
-    for (final (:segment, :from, :to) in spans) {
-      if (segment != null) {
-        final copy = audioFile(segment.source);
-        if (copy == null) {
-          missing.add(segment.source);
-        } else {
-          _append(entries, copy,
-              segment.sourceStart + (from - segment.timelineStart), to - from);
-        }
-      } else if (silenceFile == null) {
-        silenceMissing = true;
-      } else {
-        for (var left = to - from; left >= _minLength; left -= silenceLength) {
-          _append(entries, silenceFile, 0, math.min(left, silenceLength));
-        }
-      }
-    }
-    if (missing.isNotEmpty || silenceMissing) return PendingPreview(missing);
-    lines.addAll([
+    if (clips != null) ...[
+      '!no_chapters',
+      for (final (i, entry) in video.indexed) _line(entry, layout: i == layout),
+    ],
+    if (hasAudio) ...[
       '!new_stream',
       '!no_chapters',
       '!track_meta,lang=$kMonitorLanguage',
-      for (final entry in entries) _line(entry),
-    ]);
-  }
+      for (final entry in audio) _line(entry),
+    ],
+  ];
   return EdlPreview('${lines.join('\n')}\n', hasAudio: hasAudio);
+}
+
+void _checkFillerLength(double length, String name) {
+  if (length.isNaN || length < _minLength) {
+    throw ArgumentError.value(length, name, 'must be at least $_minLength');
+  }
 }
 
 List<Object> _monitoredOutput(
@@ -178,22 +191,27 @@ MediaTrack? _untouchedLane(List<Object> output, String sourcePath) {
   return untouched ? lane : null;
 }
 
-List<String> _videoGroup(List<VideoClip> clips, String sourcePath) {
+/// A imagem na ordem do programa, com o vídeo preto nos vãos: vão sem
+/// imagem no grupo tira o mpv de sincronia. Null quando um vão precisa do
+/// preto e ele ainda não existe.
+List<_Entry>? _videoEntries(
+    List<VideoClip> clips, String? blackFile, double blackLength) {
   final ordered = [
     for (final clip in clips)
       if (clip.duration >= _minLength) clip,
   ]..sort((a, b) => a.timelineStart.compareTo(b.timelineStart));
   final entries = <_Entry>[];
+  var cursor = 0.0;
   for (final clip in ordered) {
+    final gap = clip.timelineStart - cursor;
+    if (gap >= _minLength) {
+      if (blackFile == null) return null;
+      _appendFiller(entries, blackFile, gap, blackLength);
+    }
     _append(entries, clip.path, clip.sourceStart, clip.duration);
+    cursor = clip.timelineEnd;
   }
-  // o original dita as faixas do grupo: as legendas dele aparecem na prévia
-  final layout = entries.where((e) => e.path == sourcePath).firstOrNull;
-  return [
-    '!no_chapters',
-    for (final entry in entries)
-      _line(entry, layout: identical(entry, layout)),
-  ];
+  return entries;
 }
 
 /// Pedaço da faixa ouvida; sem [segment] é silêncio.
@@ -246,6 +264,15 @@ void _append(List<_Entry> entries, String path, double start, double length) {
     entries.last = (path: path, start: last.start, length: last.length + length);
   } else {
     entries.add((path: path, start: start, length: length));
+  }
+}
+
+/// Tapa [length] segundos com pedaços de até [fillerLength] do começo de
+/// [filler].
+void _appendFiller(
+    List<_Entry> entries, String filler, double length, double fillerLength) {
+  for (var left = length; left >= _minLength; left -= fillerLength) {
+    _append(entries, filler, 0, math.min(left, fillerLength));
   }
 }
 

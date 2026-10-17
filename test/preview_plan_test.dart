@@ -7,6 +7,7 @@ const kSource = '/v/episode.mkv';
 const kOpening = '/v/opening.mp4';
 const kDub = '/v/dub.mp3';
 const kSilence = '/c/silence.flac';
+const kBlack = '/c/black.mkv';
 
 AudioSegment _segment(
         String path, int typeIndex, double start, double end, double at) =>
@@ -80,7 +81,9 @@ PreviewPlan _plan(
   Object? monitor,
   String? Function(AudioSource source) audioFile = _copy,
   String? silenceFile = kSilence,
+  String? blackFile = kBlack,
   double silenceLength = 600,
+  double blackLength = 600,
 }) =>
     buildPreviewPlan(
       file: file,
@@ -88,7 +91,9 @@ PreviewPlan _plan(
       monitor: monitor,
       audioFile: audioFile,
       silenceFile: silenceFile,
+      blackFile: blackFile,
       silenceLength: silenceLength,
+      blackLength: blackLength,
     );
 
 void _expectEdl(PreviewPlan plan, List<String> lines, {bool hasAudio = true}) {
@@ -150,9 +155,11 @@ void main() {
       expect(_plan(file), const SourcePreview(kSource, 1));
     });
 
-    test('needs no copy nor silence', () {
+    test('needs no copy, silence nor black', () {
       final file = _file([_video(), _audio(0)]);
-      expect(_plan(file, audioFile: (_) => null, silenceFile: null),
+      expect(
+          _plan(file,
+              audioFile: (_) => null, silenceFile: null, blackFile: null),
           const SourcePreview(kSource, 1));
     });
 
@@ -261,7 +268,7 @@ void main() {
       ProgramEdit(file, []).cut(5, 10);
 
       _expectEdl(
-        _plan(file, audioFile: (_) => null, silenceFile: null),
+        _plan(file, audioFile: (_) => null, silenceFile: null, blackFile: null),
         [
           '# mpv EDL v0',
           '!no_chapters',
@@ -287,6 +294,91 @@ void main() {
         '%13%/c/a,b=ç.mka,0.000000,5.000000',
         '%13%/c/a,b=ç.mka,10.000000,10.000000',
       ]);
+    });
+  });
+
+  group('video gaps', () {
+    MediaTrack videoOf(List<VideoClip> clips) => _video()
+      ..clips.clear()
+      ..clips.addAll(clips);
+
+    test('a gap before the first clip shows black', () {
+      final video = videoOf([_clip(kSource, 0, 20, 2)]);
+
+      _expectEdl(_plan(_file([video, _audio(0)])), [
+        '# mpv EDL v0',
+        '!no_chapters',
+        '%12%/c/black.mkv,0.000000,2.000000',
+        '%14%/v/episode.mkv,0.000000,20.000000,layout=this',
+        ..._audioGroup,
+        '%8%/c/0.mka,0.000000,20.000000',
+      ]);
+      _expectEdl(
+        _plan(_file([video])),
+        [
+          '# mpv EDL v0',
+          '!no_chapters',
+          '%12%/c/black.mkv,0.000000,2.000000',
+          '%14%/v/episode.mkv,0.000000,20.000000,layout=this',
+        ],
+        hasAudio: false,
+      );
+    });
+
+    test('a gap between clips shows black while the sound goes on', () {
+      final video =
+          videoOf([_clip(kSource, 0, 4, 0), _clip(kSource, 4, 20, 6)]);
+
+      _expectEdl(_plan(_file([video, _audio(0)])), [
+        '# mpv EDL v0',
+        '!no_chapters',
+        '%14%/v/episode.mkv,0.000000,4.000000,layout=this',
+        '%12%/c/black.mkv,0.000000,2.000000',
+        '%14%/v/episode.mkv,4.000000,16.000000',
+        ..._audioGroup,
+        '%8%/c/0.mka,0.000000,20.000000',
+      ]);
+    });
+
+    test('a long gap takes several pieces of the black file', () {
+      final video =
+          videoOf([_clip(kSource, 0, 2, 0), _clip(kSource, 2, 20, 12)]);
+
+      _expectEdl(_plan(_file([video, _audio(0)]), blackLength: 4), [
+        '# mpv EDL v0',
+        '!no_chapters',
+        '%14%/v/episode.mkv,0.000000,2.000000,layout=this',
+        '%12%/c/black.mkv,0.000000,4.000000',
+        '%12%/c/black.mkv,0.000000,4.000000',
+        '%12%/c/black.mkv,0.000000,2.000000',
+        '%14%/v/episode.mkv,2.000000,18.000000',
+        ..._audioGroup,
+        '%8%/c/0.mka,0.000000,20.000000',
+      ]);
+    });
+
+    test('clips that touch need no black', () {
+      // menos de um décimo de milissegundo entre eles ainda é encostar
+      final video = videoOf(
+          [_clip(kSource, 0, 4, 0), _clip(kSource, 10, 20, 4.00005)]);
+
+      _expectEdl(_plan(_file([video, _audio(0)]), blackFile: null), [
+        '# mpv EDL v0',
+        '!no_chapters',
+        '%14%/v/episode.mkv,0.000000,4.000000,layout=this',
+        '%14%/v/episode.mkv,10.000000,10.000000',
+        ..._audioGroup,
+        '%8%/c/0.mka,0.000000,14.000050',
+      ]);
+    });
+
+    test('the black file must last at least a tenth of a millisecond', () {
+      final video = videoOf([_clip(kSource, 0, 20, 2)]);
+      for (final length in [0.0, -600.0, double.nan, 0.00005]) {
+        expect(() => _plan(_file([video]), blackLength: length),
+            throwsArgumentError,
+            reason: 'blackLength $length');
+      }
     });
   });
 
@@ -425,7 +517,8 @@ void main() {
           _segment(kSource, 0, 4.00005, 20, 4.00005),
         ]);
 
-      _expectEdl(_plan(_file([video, lane]), silenceFile: null), [
+      _expectEdl(
+          _plan(_file([video, lane]), silenceFile: null, blackFile: null), [
         '# mpv EDL v0',
         '!no_chapters',
         '%14%/v/episode.mkv,0.000050,19.999950,layout=this',
@@ -493,6 +586,23 @@ void main() {
       final file = _file([_video(), _audio(0)]);
       ProgramEdit(file, []).cut(5, 10);
       expect(_plan(file, silenceFile: null), isA<EdlPreview>());
+    });
+
+    test('waits for the black file only when a gap needs it', () {
+      final gap = _video()..clips.single.timelineStart = 2;
+      expect(_plan(_file([gap, _audio(0)]), blackFile: null),
+          const PendingPreview({}));
+      expect(_plan(_file([gap]), blackFile: null), const PendingPreview({}));
+      // as cópias que faltam vêm junto: quem chama avisa se alguma falhou
+      expect(
+        _plan(_file([gap, _audio(0)]),
+            audioFile: (_) => null, blackFile: null),
+        PendingPreview({const AudioSource(path: kSource, audioTypeIndex: 0)}),
+      );
+
+      final file = _file([_video(), _audio(0)]);
+      ProgramEdit(file, []).cut(5, 10);
+      expect(_plan(file, blackFile: null), isA<EdlPreview>());
     });
 
     test('a piece after the end of the program needs no copy', () {

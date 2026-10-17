@@ -15,8 +15,13 @@ const kWaveformBucketsPerSecond = 200.0;
 /// Duração do silêncio que tapa os vãos da prévia.
 const kSilenceSeconds = 600.0;
 
+/// Duração do vídeo preto que tapa os vãos da imagem na prévia.
+const kBlackSeconds = 600.0;
+
 const _waveformSampleRate = 8000;
 const _folderPrefix = 'vt-preview-';
+
+typedef _Frame = ({int width, int height, int sarNum, int sarDen});
 
 /// Pico do áudio (0..1) por bloco fixo de tempo: a forma de onda.
 class Waveform {
@@ -107,14 +112,15 @@ class PeakBuilder {
 
 /// Áudio derivado dos arquivos em edição: cada faixa copiada sozinha (o
 /// player da prévia só aceita uma faixa por arquivo num grupo de áudio), a
-/// forma de onda dela pra linha do tempo e um silêncio que tapa vãos.
+/// forma de onda dela pra linha do tempo e o que tapa os vãos da prévia: um
+/// silêncio no som e um vídeo preto na imagem.
 class AudioCache {
   AudioCache(this._ffmpeg);
 
   final FfmpegService _ffmpeg;
 
-  /// Sobe quando uma cópia, uma forma de onda ou o silêncio fica pronto (ou
-  /// falha).
+  /// Sobe quando uma cópia, uma forma de onda, o silêncio ou um vídeo preto
+  /// fica pronto (ou falha).
   final ValueNotifier<int> revision = ValueNotifier(0);
 
   final _seen = <AudioSource>{};
@@ -127,6 +133,8 @@ class AudioCache {
   var _nextName = 0;
   var _silenceStarted = false;
   String? _silence;
+  final _blackStarted = <_Frame>{};
+  final _blacks = <_Frame, String>{};
   var _disposed = false;
 
   /// Começa o trabalho das faixas ainda não vistas. Faixas de um mesmo
@@ -165,6 +173,29 @@ class AudioCache {
     return _silence;
   }
 
+  /// Vídeo preto H.264 de [kBlackSeconds] a 1 quadro por segundo, com o
+  /// tamanho de quadro (arredondado pra cima até par) e a proporção de pixel
+  /// dados: trocar pra ele não muda o tamanho da imagem no player. Null até
+  /// ficar pronto (a primeira chamada pra esse quadro começa; se falhar, não
+  /// tenta de novo).
+  String? blackVideo({
+    required int width,
+    required int height,
+    required int sarNum,
+    required int sarDen,
+  }) {
+    final frame = (
+      width: width + width % 2,
+      height: height + height % 2,
+      sarNum: sarNum,
+      sarDen: sarDen,
+    );
+    if (!_disposed && _blackStarted.add(frame)) {
+      unawaited(_makeBlack(frame));
+    }
+    return _blacks[frame];
+  }
+
   /// A cópia falhou: quem pediu segue sem ela em vez de esperar.
   bool failed(AudioSource source) => _failed.contains(source);
 
@@ -177,6 +208,7 @@ class AudioCache {
     _copies.clear();
     _waveforms.clear();
     _silence = null;
+    _blacks.clear();
     final running = [..._running];
     for (final process in running) {
       process.kill(ProcessSignal.sigkill);
@@ -253,20 +285,39 @@ class AudioCache {
   }
 
   Future<void> _makeSilence() async {
-    final folder = await _workFolder();
-    final path = folder == null ? null : p.join(folder.path, 'silence.flac');
-    final made = path != null &&
-        await _run([
-          '-y',
-          '-f', 'lavfi',
-          '-i', 'anullsrc=r=48000:cl=stereo',
-          '-t', '$kSilenceSeconds',
-          '-c:a', 'flac',
-          path,
-        ]);
+    final path = await _generate('silence.flac', [
+      '-f', 'lavfi',
+      '-i', 'anullsrc=r=48000:cl=stereo',
+      '-t', '$kSilenceSeconds',
+      '-c:a', 'flac',
+    ]);
     if (_disposed) return;
-    if (made) _silence = path;
+    _silence = path;
     revision.value++;
+  }
+
+  Future<void> _makeBlack(_Frame frame) async {
+    final path = await _generate('black-${_nextName++}.mkv', [
+      '-f', 'lavfi',
+      '-i', 'color=c=black:s=${frame.width}x${frame.height}:r=1',
+      '-t', '$kBlackSeconds',
+      '-vf', 'setsar=${frame.sarNum}/${frame.sarDen}',
+      '-c:v', 'libx264',
+      '-preset', 'ultrafast',
+      '-tune', 'stillimage',
+      '-pix_fmt', 'yuv420p',
+    ]);
+    if (_disposed) return;
+    if (path != null) _blacks[frame] = path;
+    revision.value++;
+  }
+
+  /// Grava [name] na pasta de trabalho com o FFmpeg; null se não deu.
+  Future<String?> _generate(String name, List<String> args) async {
+    final folder = await _workFolder();
+    if (folder == null) return null;
+    final path = p.join(folder.path, name);
+    return await _run(['-y', ...args, path]) ? path : null;
   }
 
   Future<bool> _run(

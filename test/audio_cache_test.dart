@@ -156,6 +156,17 @@ void main() {
       await _until(cache, () => cache.revision.value > before);
       expect(cache.silence(), isNull);
 
+      String? black() =>
+          cache.blackVideo(width: 64, height: 48, sarNum: 1, sarDen: 1);
+      final beforeBlack = cache.revision.value;
+      expect(black(), isNull);
+      await _until(cache, () => cache.revision.value > beforeBlack);
+      final failed = cache.revision.value;
+      expect(black(), isNull);
+      // pedir de novo não tenta outra vez
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      expect(cache.revision.value, failed);
+
       await cache.dispose();
       await cache.dispose();
     });
@@ -252,6 +263,53 @@ void main() {
       await cache.dispose();
       expect(Directory(folder).existsSync(), isFalse);
       expect(cache.extracted(toneFirst), isNull);
+    }, timeout: const Timeout(Duration(minutes: 1)));
+
+    test('makes one black video per frame, with its size and pixel shape',
+        () async {
+      final ffmpeg = FfmpegService();
+      if (!await ffmpeg.locate()) {
+        markTestSkipped('needs ffmpeg and ffprobe installed');
+        return;
+      }
+      final cache = AudioCache(ffmpeg);
+      addTearDown(cache.dispose);
+      String? wide() =>
+          cache.blackVideo(width: 63, height: 47, sarNum: 4, sarDen: 3);
+      String? square() =>
+          cache.blackVideo(width: 64, height: 48, sarNum: 1, sarDen: 1);
+      expect(wide(), isNull);
+      expect(square(), isNull);
+      await _until(cache, () => wide() != null && square() != null);
+
+      expect(wide(), isNot(square()));
+      // o quadro ímpar arredonda pra cima: é o mesmo vídeo do par
+      expect(cache.blackVideo(width: 64, height: 48, sarNum: 4, sarDen: 3),
+          wide());
+      for (final (path, sar) in [(wide()!, '4:3'), (square()!, '1:1')]) {
+        final black = await _probe(ffmpeg.ffprobePath!, path);
+        final duration = (black['format'] as Map)['duration'] as String;
+        expect(double.parse(duration), closeTo(kBlackSeconds, 1));
+        expect(
+          (black['streams'] as List).single,
+          allOf(
+            containsPair('codec_name', 'h264'),
+            containsPair('width', 64),
+            containsPair('height', 48),
+            containsPair('sample_aspect_ratio', sar),
+            containsPair('pix_fmt', 'yuv420p'),
+            containsPair('avg_frame_rate', '1/1'),
+          ),
+          reason: path,
+        );
+      }
+
+      final folder = p.dirname(wide()!);
+      expect(p.basename(folder), startsWith('vt-preview-'));
+      expect(p.dirname(square()!), folder);
+      await cache.dispose();
+      expect(Directory(folder).existsSync(), isFalse);
+      expect(square(), isNull);
     }, timeout: const Timeout(Duration(minutes: 1)));
   });
 }
