@@ -39,6 +39,7 @@ MediaTrack _audio(int streamIndex, int typeIndex, {double duration = 600}) {
 VideoClip _clip(String path, double start, double end,
         {int width = 1432,
         int height = 1080,
+        String rate = '2997/100',
         int sarNum = 1,
         int sarDen = 1}) =>
     VideoClip(
@@ -46,7 +47,7 @@ VideoClip _clip(String path, double start, double end,
       streamTypeIndex: 0,
       width: width,
       height: height,
-      rate: '2997/100',
+      rate: rate,
       sarNum: sarNum,
       sarDen: sarDen,
       sourceStart: start,
@@ -515,7 +516,8 @@ void main() {
 
       expect(joined, contains('-ss 90.000 -i $kSource'));
       expect(filter, contains('[1:v:0]trim=duration=510.000,setpts=PTS-STARTPTS,'
-          'setsar=1/1,fps=2997/100[pv0]'));
+          'setsar=1/1,fps=2997/100,tpad=stop=-1:stop_mode=clone,'
+          'trim=end_frame=15285[pv0]'));
       expect(filter, contains('[pv0]concat=n=1:v=1:a=0[program]'));
       expect(joined, contains('-map [program]'));
       expect(joined, contains('-c:v:0 libsvtav1 -preset:v:0 8 -crf:v:0 30'));
@@ -543,13 +545,14 @@ void main() {
       final filter = result.args[result.args.indexOf('-filter_complex') + 1];
 
       expect(filter, contains(
-          'scale=1432:806,pad=1432:1080:0:137,setsar=1/1,fps=2997/100[pv0]'));
+          'scale=1432:806,pad=1432:1080:0:137,setsar=1/1,fps=2997/100,'
+          'tpad=stop=-1:stop_mode=clone,trim=end_frame=2518[pv0]'));
       expect(filter, contains('[pv0][pv1]concat=n=2:v=1:a=0[program]'));
       expect(filter, contains('[3:a:0]atrim=start=0.000:end=84.000'));
       expect(joined, contains('-c:v:0 libx265'));
     });
 
-    test('a gap before the first clip is black in the program frame', () {
+    test('a gap before the first clip is black inside the clip chain', () {
       final video = _video()
         ..clips.add(_clip(kSource, 0, 600, sarNum: 32, sarDen: 27)
           ..timelineStart = 2.5);
@@ -561,11 +564,12 @@ void main() {
       );
       final filter = result.args[result.args.indexOf('-filter_complex') + 1];
 
-      expect(filter, contains('color=c=black:s=1432x1080:r=2997/100:d=2.500,'
-          'setsar=32/27[pg0]'));
       expect(filter, contains('[1:v:0]trim=duration=600.000,'
-          'setpts=PTS-STARTPTS,setsar=32/27,fps=2997/100[pv0]'));
-      expect(filter, contains('[pg0][pv0]concat=n=2:v=1:a=0[program]'));
+          'setpts=PTS-STARTPTS,setsar=32/27,fps=2997/100,'
+          'tpad=start=75:color=black:stop=-1:stop_mode=clone,'
+          'trim=end_frame=18057[pv0]'));
+      expect(filter, isNot(contains('color=c=')));
+      expect(filter, contains('[pv0]concat=n=1:v=1:a=0[program]'));
     });
 
     test('a gap between two clips is black and the audio stays whole', () {
@@ -582,10 +586,58 @@ void main() {
       final filter = result.args[result.args.indexOf('-filter_complex') + 1];
 
       expect(joined, contains('-ss 300.000 -i $kSource'));
-      expect(filter, contains('color=c=black:s=1432x1080:r=2997/100:d=10.000,'
-          'setsar=1/1[pg1]'));
-      expect(filter, contains('[pv0][pg1][pv1]concat=n=3:v=1:a=0[program]'));
+      expect(filter, contains('fps=2997/100,tpad=stop=-1:stop_mode=clone,'
+          'trim=end_frame=8991[pv0]'));
+      expect(filter, contains('[2:v:0]trim=duration=300.000,'
+          'setpts=PTS-STARTPTS,setsar=1/1,fps=2997/100,'
+          'tpad=start=300:color=black:stop=-1:stop_mode=clone,'
+          'trim=end_frame=9291[pv1]'));
+      expect(filter, contains('[pv0][pv1]concat=n=2:v=1:a=0[program]'));
       expect(joined, contains('-map 0:a:0'));
+    });
+
+    test('gaps are counted on the program frames, so they never add up', () {
+      final video = _video()
+        ..clips.addAll([
+          for (var i = 0; i < 4; i++)
+            _clip(kSource, 3.0 * i, 3.0 * (i + 1), rate: '25/1')
+              ..timelineStart = 3.41 * i,
+        ]);
+
+      final result = service.buildSaveArgs(
+        source: _file([video, _audio(1, 0)]),
+        added: [],
+        outputPath: '/tmp/out.mkv',
+      );
+      final filter = result.args[result.args.indexOf('-filter_complex') + 1];
+
+      expect(filter, contains('fps=25/1,tpad=stop=-1:stop_mode=clone,'
+          'trim=end_frame=75[pv0]'));
+      expect(filter, contains('fps=25/1,tpad=start=11:color=black:'
+          'stop=-1:stop_mode=clone,trim=end_frame=86[pv1]'));
+      expect(filter, contains('fps=25/1,tpad=start=10:color=black:'
+          'stop=-1:stop_mode=clone,trim=end_frame=85[pv2]'));
+      expect(filter, contains('fps=25/1,tpad=start=10:color=black:'
+          'stop=-1:stop_mode=clone,trim=end_frame=85[pv3]'));
+    });
+
+    test('a gap between two program frames leaves no black', () {
+      final video = _video()
+        ..clips.addAll([
+          _clip(kSource, 0, 3.01, rate: '25/1'),
+          _clip(kSource, 3.03, 6, rate: '25/1')..timelineStart = 3.03,
+        ]);
+
+      final result = service.buildSaveArgs(
+        source: _file([video, _audio(1, 0)]),
+        added: [],
+        outputPath: '/tmp/out.mkv',
+      );
+      final filter = result.args[result.args.indexOf('-filter_complex') + 1];
+
+      expect(filter, isNot(contains('tpad=start')));
+      expect(filter, contains('trim=end_frame=76[pv0]'));
+      expect(filter, contains('trim=end_frame=74[pv1]'));
     });
 
     test('clips less than 1 ms apart touch, with no black between them', () {
@@ -600,7 +652,9 @@ void main() {
       );
       final filter = result.args[result.args.indexOf('-filter_complex') + 1];
 
-      expect(filter, isNot(contains('color=')));
+      expect(filter, isNot(contains('tpad=start')));
+      expect(filter, contains('trim=end_frame=8991[pv0]'));
+      expect(filter, contains('trim=end_frame=8992[pv1]'));
       expect(filter, contains('[pv0][pv1]concat=n=2:v=1:a=0[program]'));
     });
 

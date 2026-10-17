@@ -785,31 +785,37 @@ class FfmpegService {
 
     // Programa editado: cada trecho vira uma entrada com busca própria (-ss)
     // e corte exato no filtro; tudo é encaixado no quadro do vídeo original.
-    // O vão antes do primeiro trecho ou entre dois deles sai preto.
+    // Trechos e vãos pretos ficam nos quadros do programa em que caem (senão
+    // a imagem se afasta do som a cada vão); o preto sai do trecho seguinte
+    // porque vídeo de celular é decodificado já girado.
     String programLabel(List<VideoClip> clips) {
       final ordered = [...clips]
         ..sort((a, b) => a.timelineStart.compareTo(b.timelineStart));
       final frame = ordered.firstWhere((c) => c.path == source.path,
           orElse: () => ordered.first);
-      final setsar = 'setsar=${frame.sarNum}/${frame.sarDen}';
+      int gridFrame(double t) => (t * frame.frameRate - 1e-6).ceil();
       final labels = <String>[];
       var cursor = 0.0;
+      var cursorFrame = 0;
       for (var k = 0; k < ordered.length; k++) {
         final clip = ordered[k];
-        if (clip.timelineStart > cursor + 1e-3) {
-          filterChains.add(
-              'color=c=black:s=${frame.width}x${frame.height}:r=${frame.rate}'
-              ':d=${_s3(clip.timelineStart - cursor)},$setsar[pg$k]');
-          labels.add('pg$k');
-        }
-        cursor = math.max(cursor, clip.timelineEnd);
+        final start = clip.timelineStart > cursor + 1e-3
+            ? math.max(cursorFrame, gridFrame(clip.timelineStart))
+            : cursorFrame;
+        final end = math.max(start + 1, gridFrame(clip.timelineEnd));
+        final gap = start - cursorFrame;
         final input = inputFor(clip.path, flags: ['-ss', _s3(clip.sourceStart)]);
         final fit = _fitFilter(clip, frame);
         filterChains.add('[$input:v:${clip.streamTypeIndex}]'
             'trim=duration=${_s3(clip.duration)},setpts=PTS-STARTPTS'
             '${fit == null ? '' : ',$fit'}'
-            ',$setsar,fps=${frame.rate}[pv$k]');
+            ',setsar=${frame.sarNum}/${frame.sarDen},fps=${frame.rate}'
+            ',tpad=${gap > 0 ? 'start=$gap:color=black:' : ''}'
+            'stop=-1:stop_mode=clone,trim=end_frame=${end - cursorFrame}'
+            '[pv$k]');
         labels.add('pv$k');
+        cursor = math.max(cursor, clip.timelineEnd);
+        cursorFrame = end;
       }
       filterChains.add('${labels.map((l) => '[$l]').join()}'
           'concat=n=${labels.length}:v=1:a=0[program]');
