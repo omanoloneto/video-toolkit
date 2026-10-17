@@ -8,7 +8,22 @@ permissions:
   contents: write
 
 jobs:
+  # o binário leva a versão da tag; um pubspec atrasado faria a build local
+  # se achar velha e tentar se atualizar
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag igual à versão do pubspec
+        run: |
+          PUBSPEC=$(sed -n 's/^version: *\([0-9.]*\).*/\1/p' pubspec.yaml)
+          if [ "v$PUBSPEC" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::pubspec.yaml diz $PUBSPEC, a tag é $GITHUB_REF_NAME"
+            exit 1
+          fi
+
   build-macos:
+    needs: version
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -16,18 +31,21 @@ jobs:
         with:
           channel: stable
       - run: flutter pub get
-      - run: flutter build macos --release
+      - run: |
+          flutter build macos --release \
+            --build-name "${GITHUB_REF_NAME#v}" --build-number "$GITHUB_RUN_NUMBER"
       - name: Zip app bundle
         run: |
           cd build/macos/Build/Products/Release
-          ditto -c -k --keepParent "Video Toolkit.app" \
-            "VideoToolkit-${GITHUB_REF_NAME#v}-macos.zip"
+          codesign --verify --deep --strict "Video Toolkit.app"
+          ditto -c -k --keepParent "Video Toolkit.app" VideoToolkit-macos.zip
       - uses: actions/upload-artifact@v4
         with:
           name: macos
-          path: build/macos/Build/Products/Release/VideoToolkit-*-macos.zip
+          path: build/macos/Build/Products/Release/VideoToolkit-macos.zip
 
   build-windows:
+    needs: version
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -35,19 +53,24 @@ jobs:
         with:
           channel: stable
       - run: flutter pub get
-      - run: flutter build windows --release
-      - name: Zip runner
+      - name: Build
         shell: pwsh
         run: |
           $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          flutter build windows --release --build-name $version `
+            --build-number $env:GITHUB_RUN_NUMBER
+      - name: Zip runner
+        shell: pwsh
+        run: |
           Compress-Archive -Path build/windows/x64/runner/Release/* `
-            -DestinationPath "VideoToolkit-$version-windows.zip"
+            -DestinationPath VideoToolkit-windows.zip
       - uses: actions/upload-artifact@v4
         with:
           name: windows
-          path: VideoToolkit-*-windows.zip
+          path: VideoToolkit-windows.zip
 
   build-linux:
+    needs: version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -61,7 +84,9 @@ jobs:
             libgtk-3-dev liblzma-dev libmpv-dev mpv imagemagick
       - run: flutter pub get
       - run: flutter test
-      - run: flutter build linux --release
+      - run: |
+          flutter build linux --release \
+            --build-name "${GITHUB_REF_NAME#v}" --build-number "$GITHUB_RUN_NUMBER"
       - name: Build .deb package
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
@@ -105,11 +130,11 @@ jobs:
           EOF
 
           dpkg-deb --build --root-owner-group "$PKG" \
-            "video-toolkit_${VERSION}_amd64.deb"
+            video-toolkit-linux-amd64.deb
       - uses: actions/upload-artifact@v4
         with:
           name: linux
-          path: video-toolkit_*_amd64.deb
+          path: video-toolkit-linux-amd64.deb
 
   release:
     needs: [build-macos, build-windows, build-linux]
@@ -118,22 +143,34 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
+      # o app só instala o que bate com esta lista
+      - name: SHA-256 dos arquivos
+        run: |
+          sha256sum VideoToolkit-macos.zip VideoToolkit-windows.zip \
+            video-toolkit-linux-amd64.deb > SHA256SUMS.txt
+          cat SHA256SUMS.txt
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            VideoToolkit-*-macos.zip
-            VideoToolkit-*-windows.zip
-            video-toolkit_*_amd64.deb
+            VideoToolkit-macos.zip
+            VideoToolkit-windows.zip
+            video-toolkit-linux-amd64.deb
+            SHA256SUMS.txt
           generate_release_notes: true
           body: |
             Video Toolkit — editor visual de faixas de áudio, vídeo e
             legendas para MP4/MKV (timeline, preview, temas e FFmpeg).
 
+            Página com os downloads e as instruções:
+            https://omanoloneto.pro/video-toolkit/ — quem já tem o app
+            recebe esta versão sozinho ao abrir.
+
             **Requisito em todas as plataformas: FFmpeg instalado.**
             - macOS: `brew install ffmpeg` · descompacte o zip e arraste o
-              app para Aplicativos. Na primeira abertura use botão direito →
-              Abrir (app não assinado).
-            - Windows: `winget install ffmpeg` · descompacte o zip e execute
-              `video_toolkit.exe`.
-            - Linux (Debian/Ubuntu): `sudo apt install ./video-toolkit_*_amd64.deb`
+              app para Aplicativos. Na primeira abertura: Ajustes do
+              Sistema → Privacidade e Segurança → Abrir Mesmo Assim (app não
+              notarizado).
+            - Windows: `winget install ffmpeg` · descompacte o zip numa pasta
+              sua (não em Arquivos de Programas) e execute `video_toolkit.exe`.
+            - Linux (Debian/Ubuntu): `sudo apt install ./video-toolkit-linux-amd64.deb`
               (o FFmpeg entra como dependência).

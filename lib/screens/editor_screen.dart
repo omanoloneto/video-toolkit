@@ -1,13 +1,14 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
-import 'dart:ui' show AppExitResponse;
+import 'dart:ui' show AppExitResponse, AppExitType;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/services.dart';
 import 'package:fluent_ui/fluent_ui.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path/path.dart' as p;
 
 import '../models/program.dart';
@@ -15,6 +16,7 @@ import '../models/tracks.dart';
 import '../services/media_cache.dart';
 import '../services/ffmpeg_service.dart';
 import '../services/preview_plan.dart';
+import '../services/updater.dart';
 import '../theme/app_themes.dart';
 import '../theme/theme_icons.dart';
 import '../widgets/editor_keyboard.dart';
@@ -22,6 +24,7 @@ import '../widgets/preview_panel.dart';
 import '../widgets/properties_panel.dart';
 import '../widgets/save_dialog.dart';
 import '../widgets/timeline_panel.dart';
+import '../widgets/update_dialog.dart';
 
 const kLogoAsset = 'assets/logo.png';
 
@@ -29,10 +32,13 @@ Duration _durationOf(double seconds) =>
     Duration(milliseconds: (seconds * 1000).round());
 
 class EditorScreen extends StatefulWidget {
-  const EditorScreen({super.key, this.initialPath});
+  const EditorScreen({super.key, this.initialPath, this.updater});
 
   /// Optional video to load on startup (command-line argument).
   final String? initialPath;
+
+  /// Procura versão nova ao abrir; null em desenvolvimento e nos testes.
+  final Updater? updater;
 
   @override
   State<EditorScreen> createState() => _EditorScreenState();
@@ -78,6 +84,38 @@ class _EditorScreenState extends State<EditorScreen> {
     super.initState();
     _exitListener = AppLifecycleListener(onExitRequested: _releaseForExit);
     _checkFfmpeg();
+    PackageInfo.fromPlatform().then((info) {
+      if (mounted) setState(() => _version = info.version);
+      // depois de abrir: a checagem não atrasa a primeira tela
+      Future.delayed(const Duration(seconds: 2), () => _checkForUpdate(info));
+    });
+  }
+
+  String? _version;
+
+  Future<void> _checkForUpdate(PackageInfo info) async {
+    final updater = widget.updater;
+    if (updater == null || !mounted) return;
+    final AppRelease? release;
+    try {
+      release = await updater.newerThan(info.version);
+    } catch (_) {
+      // sem internet ou GitHub fora do ar: segue na versão que tem
+      return;
+    }
+    if (release == null || !mounted) return;
+    final file = _file;
+    final restarted = await showUpdateDialog(
+      context,
+      updater: updater,
+      release: release,
+      current: info.version,
+      confirmRestart: file != null,
+      relaunchArgs: [if (file != null) file.path],
+    );
+    if (restarted) {
+      await ServicesBinding.instance.exitApplication(AppExitType.cancelable);
+    }
   }
 
   @override
@@ -877,7 +915,7 @@ class _EditorScreenState extends State<EditorScreen> {
           PlatformMenuItem(
             label: 'Sobre o Video Toolkit',
             onSelected: () => _showError(
-              'Video Toolkit',
+              'Video Toolkit ${_version ?? ''}'.trim(),
               'Editor de faixas de áudio, vídeo e legendas para arquivos '
                   'MP4/MKV, usando FFmpeg.\n\n'
                   'Atalhos: espaço = play/pause · S = dividir · '
