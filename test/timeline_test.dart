@@ -76,7 +76,6 @@ MediaTrack _subtitle() => MediaTrack(
 class _CountingWaveform extends Waveform {
   _CountingWaveform(super.peaks);
 
-  // começo, em segundos da origem, de cada coluna desenhada
   final starts = <double>[];
 
   @override
@@ -122,8 +121,9 @@ Widget _wrap({
 }
 
 void main() {
-  Future<void> useDesktopSurface(WidgetTester tester) async {
-    tester.view.physicalSize = const Size(1600, 900);
+  Future<void> useDesktopSurface(WidgetTester tester,
+      [Size size = const Size(1600, 900)]) async {
+    tester.view.physicalSize = size;
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
   }
@@ -269,8 +269,6 @@ void main() {
     }
   }
 
-  // dois dedos no trackpad a partir de [at], puxando o conteúdo [dx] pra
-  // esquerda
   Future<void> swipe(WidgetTester tester, Offset at, double dx) async {
     final gesture =
         await tester.createGesture(kind: PointerDeviceKind.trackpad);
@@ -585,7 +583,6 @@ void main() {
       await tester.pump(const Duration(milliseconds: 500));
     }
 
-    // a borda passa por cima do outro trecho e volta: nada muda
     await dragAndBack('trim-start', 30);
     expect(_range(first), (10.0, 50.0, 10.0));
     await dragAndBack('trim-end', -35);
@@ -611,11 +608,9 @@ void main() {
     expect(first.duration, closeTo(kMinPieceDuration, 1e-9));
     expect(first.timelineEnd, closeTo(40, 1e-9));
 
-    // mesmo com o vizinho selecionado, a caixa do trecho estreito fica por
-    // cima dele
-    await tester.tap(find.byKey(ValueKey<Object>(second)));
+    await tester.tap(find.text('Vídeo 1'));
     await tester.pump(const Duration(milliseconds: 500));
-    expect(selection?.clip, same(second));
+    expect(selection?.clip, isNull);
 
     await tester.dragFrom(
         tester.getTopLeft(find.byKey(ValueKey<Object>(first))) +
@@ -628,6 +623,74 @@ void main() {
     expect(first.timelineStart, lessThan(39));
     expect(first.timelineEnd, closeTo(40, 1e-9));
     expect(_range(second), (40.0, 100.0, 40.0));
+  });
+
+  testWidgets('the selected neighbour of a clip trimmed to the minimum keeps '
+      'its left edge', (tester) async {
+    await useDesktopSurface(tester);
+    final video = _video([_clip(0, 40, 0), _clip(40, 100, 40)]);
+    final [first, second] = video.clips;
+    TimelineSelection? selection;
+
+    await tester.pumpWidget(_wrap(
+      file: _file([video]),
+      selection: null,
+      onSelectionChanged: (s) => selection = s,
+    ));
+    final pps =
+        tester.getSize(find.byKey(ValueKey<Object>(second))).width / 60;
+
+    await tester.drag(handle(first, 'trim-start'), const Offset(2000, 0));
+    await tester.pump(const Duration(milliseconds: 500));
+    await tester.tap(find.byKey(ValueKey<Object>(second)));
+    await tester.pump(const Duration(milliseconds: 500));
+
+    await tester.dragFrom(tester.getCenter(handle(second, 'trim-start')),
+        const Offset(100, 0),
+        kind: PointerDeviceKind.mouse);
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(selection?.clip, same(second));
+    expect(second.timelineStart, closeTo(40 + 100 / pps, 1e-6));
+    expect(second.sourceStart, closeTo(second.timelineStart, 1e-9));
+    expect(first.duration, closeTo(kMinPieceDuration, 1e-9));
+    expect(first.timelineEnd, closeTo(40, 1e-9));
+  });
+
+  testWidgets('a second finger dragging another clip leaves the first one '
+      'whole', (tester) async {
+    await useDesktopSurface(tester);
+    final video = _video([_clip(0, 40, 0), _clip(60, 100, 60)]);
+    final [first, second] = video.clips;
+
+    await tester.pumpWidget(_wrap(
+      file: _file([video]),
+      selection: null,
+      onSelectionChanged: (_) {},
+    ));
+
+    Future<void> slide(TestGesture finger, double dx, int times) async {
+      for (var i = 0; i < times; i++) {
+        await finger.moveBy(Offset(dx, 0));
+        await tester.pump();
+      }
+    }
+
+    final one = await tester
+        .startGesture(tester.getCenter(find.byKey(ValueKey<Object>(first))));
+    await slide(one, 10, 4);
+    final two = await tester
+        .startGesture(tester.getCenter(find.byKey(ValueKey<Object>(second))));
+    await slide(two, 10, 4);
+    await slide(one, 5, 1);
+    await one.up();
+    await two.up();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect((first.sourceStart, first.sourceEnd), (0.0, 40.0));
+    expect((second.sourceStart, second.sourceEnd), (60.0, 100.0));
+    expect(second.timelineStart, greaterThan(60));
+    expect(first.timelineEnd, lessThanOrEqualTo(second.timelineStart));
   });
 
   testWidgets('trimming the end of the last clip while scrolled to the end '
@@ -657,12 +720,10 @@ void main() {
       await tester.pump();
     }
 
-    // a linha do tempo não encolhe no meio do arrasto
     expect(clip.timelineEnd, lessThan(100));
     expect(tester.getTopRight(box).dx, closeTo(edge - 300, 1));
     expect(position.maxScrollExtent, extent);
 
-    // solto, ela volta a acabar logo depois do vídeo
     await gesture.up();
     await tester.pump(const Duration(milliseconds: 500));
     expect(position.maxScrollExtent, lessThan(extent));
@@ -715,7 +776,6 @@ void main() {
     waveform.starts.clear();
     await zoomIn(tester, 1);
 
-    // 500 px/s: o trecho inteiro tem 50.000 colunas
     final seg = find.byKey(ValueKey<Object>(audio.segments.single));
     expect(tester.getSize(seg).width, 50000);
     final position = timelineScroll(tester);
@@ -731,6 +791,38 @@ void main() {
     expect(waveform.starts.length, lessThan(viewport + 40));
     expect(waveform.starts.first, closeTo(20, 0.05));
     expect(waveform.starts.last, closeTo(20 + viewport / 500, 0.05));
+  });
+
+  testWidgets('widening the window draws the waveform it uncovers',
+      (tester) async {
+    await useDesktopSurface(tester, const Size(1000, 900));
+    final audio = _audio(0);
+    final waveform = _CountingWaveform(Float32List.fromList(
+        List.generate(100 * 200, (i) => (i % 200) / 200)));
+
+    await tester.pumpWidget(_wrap(
+      file: _file([audio]),
+      selection: null,
+      onSelectionChanged: (_) {},
+      waveformOf: (_) => waveform,
+    ));
+    await zoomIn(tester, 6);
+    final position = timelineScroll(tester);
+    position.jumpTo(3000);
+    await tester.pump();
+    final pps = tester
+            .getSize(find.byKey(ValueKey<Object>(audio.segments.single)))
+            .width /
+        100;
+
+    waveform.starts.clear();
+    tester.view.physicalSize = const Size(1600, 900);
+    await tester.pump();
+
+    expect(position.pixels, 3000);
+    expect(waveform.starts, isNotEmpty);
+    expect(waveform.starts.last,
+        greaterThan((3000 + position.viewportDimension) / pps));
   });
 
   test('parseTimelineTime handles the common formats', () {
@@ -753,16 +845,12 @@ void main() {
           margin: margin,
         );
 
-    // no começo e no fim da rolagem (conteúdo de 100 + 5000 + 24 px)
     expect(columns(100, 5000, 0), (from: 0, to: 900));
     expect(columns(100, 5000, 4124), (from: 4024, to: 5000));
-    // a folga vale dos dois lados da janela
     expect(columns(100, 5000, 1000, margin: 8), (from: 892, to: 1908));
     expect(columns(0, 500, 507, margin: 8), (from: 499, to: 500));
-    // a janela não passa das bordas do trecho
     expect(columns(200, 300.5, 0), (from: 0, to: 301));
     expect(columns(200, 300, 150, margin: 8), (from: 0, to: 300));
-    // trecho fora da tela, nada
     expect(columns(3000, 500, 0), (from: 0, to: 0));
     expect(columns(0, 500, 1000), (from: 0, to: 0));
     expect(columns(0, 500, 508, margin: 8), (from: 0, to: 0));
