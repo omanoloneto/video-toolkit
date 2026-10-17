@@ -511,19 +511,30 @@ class FfmpegService {
         ':${(frame.width - w) ~/ 2}:${(frame.height - h) ~/ 2}';
   }
 
-  /// Legendas cortadas pelo programa: as falas vão pra um arquivo novo antes
-  /// de salvar. Legenda de imagem não dá.
+  /// Legenda inteira que vai copiada: a que não foi adiantada e a de imagem.
+  /// A de texto adiantada é reescrita, pois a cópia com -ss perderia a fala
+  /// que já está na tela no novo começo.
+  static bool _copiesSubtitle(Object lane) => switch (lane) {
+        MediaTrack(:final pieces, :final offsetSeconds, :final codec) ||
+        ExternalTrack(:final pieces, :final offsetSeconds, :final codec) =>
+          subtitleIsWhole(pieces) &&
+              (offsetSeconds >= 0 || _isBitmapSubtitle(codec)),
+        _ => false,
+      };
+
+  /// Legendas cortadas pelo programa ou adiantadas: as falas vão pra um
+  /// arquivo novo antes de salvar. Legenda de imagem não dá.
   static List<Object> subtitlesToRetime(
           MediaFileInfo source, List<ExternalTrack> added) =>
       [
         ...source.tracks.where((t) =>
             t.type == TrackType.subtitle &&
             !t.removed &&
-            !subtitleIsWhole(t.pieces) &&
+            !_copiesSubtitle(t) &&
             !_isBitmapSubtitle(t.codec)),
         ...added.where((t) =>
             t.type == TrackType.subtitle &&
-            !subtitleIsWhole(t.pieces) &&
+            !_copiesSubtitle(t) &&
             !_isBitmapSubtitle(t.codec)),
       ];
 
@@ -830,10 +841,14 @@ class FfmpegService {
         final gap = start - cursorFrame;
         final input = inputFor(clip.path, flags: ['-ss', _s3(clip.sourceStart)]);
         final fit = _fitFilter(clip, frame);
+        // tempo da origem, como no áudio: vídeo que começa depois do corte
+        // repete o primeiro quadro até lá, e esse quadro sempre passa (senão
+        // o trecho sairia vazio)
         filterChains.add('[$input:v:${clip.streamTypeIndex}]'
-            'trim=duration=${_s3(clip.duration)},setpts=PTS-STARTPTS'
+            'trim=end=${_s3(clip.duration)}:end_frame=1'
             '${fit == null ? '' : ',$fit'}'
-            ',setsar=${frame.sarNum}/${frame.sarDen},fps=${frame.rate}'
+            ',setsar=${frame.sarNum}/${frame.sarDen}'
+            ',fps=${frame.rate}:start_time=0'
             ',tpad=${gap > 0 ? 'start=$gap:color=black:' : ''}'
             'stop=-1:stop_mode=clone,trim=end_frame=${end - cursorFrame}'
             '[pv$k]');
@@ -846,16 +861,10 @@ class FfmpegService {
       return 'program';
     }
 
-    // legenda cortada pelo programa vem do arquivo reescrito
+    // legenda cortada pelo programa ou adiantada vem do arquivo reescrito
     bool addRetimedSubtitle(Object lane, String codec, String title,
         String? language, String name) {
-      if (subtitleIsWhole(switch (lane) {
-        MediaTrack(:final pieces) => pieces,
-        ExternalTrack(:final pieces) => pieces,
-        _ => const <SubtitlePiece>[],
-      })) {
-        return false;
-      }
+      if (_copiesSubtitle(lane)) return false;
       final file = subtitleFiles[lane];
       if (file == null) {
         warnings.add('A legenda "$name" (${codec.toUpperCase()}) não pode ser '

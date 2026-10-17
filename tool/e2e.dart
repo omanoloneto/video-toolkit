@@ -326,13 +326,18 @@ Future<void> main() async {
     // -------------------------------------------------- cut inside a long GOP
     // copiar a partir de um -ss traz os pacotes desde o keyframe de antes: o
     // som tirado voltava no começo e o arquivo inteiro atrasava
+    final gopSubs = '${dir.path}/legenda-gop.srt';
+    await File(gopSubs).writeAsString(
+        '1\n00:00:00,500 --> 00:00:01,000\num\n\n'
+        '2\n00:00:01,500 --> 00:00:03,000\natravessa\n\n'
+        '3\n00:00:03,000 --> 00:00:04,000\ndois\n');
     final longGop = '${dir.path}/gop-longo.mkv';
     await _run(service.ffmpegPath!, [
       '-y',
       '-f', 'lavfi', '-i', 'testsrc=duration=6:size=320x240:rate=25',
       '-f', 'lavfi',
       '-i', "aevalsrc='if(gte(t,3.3),0.5*sin(2*PI*440*t),0)':s=48000:d=6",
-      '-i', subs,
+      '-i', gopSubs,
       '-map', '0', '-map', '1', '-map', '2',
       '-c:v', 'libx264', '-g', '250', '-x264-params', 'scenecut=0',
       '-c:a', 'aac', '-c:s', 'srt',
@@ -356,24 +361,30 @@ Future<void> main() async {
           '${start.toStringAsFixed(1)}dB');
     }
 
-    final earlier = await service.probe(longGop);
-    earlier.byType(TrackType.subtitle).single.offsetSeconds = -2;
-    final earlierOut = '${dir.path}/legenda-adiantada.mkv';
-    result =
-        await service.save(source: earlier, added: [], outputPath: earlierOut);
-    check('subtitle moved earlier save succeeds', result.success,
-        result.errorTail);
-    if (result.success) {
+    // a fala que já está na tela no novo começo fica, cortada no zero, como
+    // no corte do programa; a do MP4 vira mov_text e também não pode atrasar
+    for (final ext in ['mkv', 'mp4']) {
+      final earlier = await service.probe(longGop);
+      earlier.byType(TrackType.subtitle).single.offsetSeconds = -2;
+      final earlierOut = '${dir.path}/legenda-adiantada.$ext';
+      result = await service.save(
+          source: earlier, added: [], outputPath: earlierOut);
+      check('subtitle moved earlier save ($ext) succeeds', result.success,
+          result.errorTail);
+      if (!result.success) continue;
       final duration = await _mediaDuration(service.ffprobePath!, earlierOut);
-      check('subtitle moved earlier keeps the file at 6s',
+      check('subtitle moved earlier keeps the file at 6s ($ext)',
           (duration - 6).abs() < 0.1, duration.toStringAsFixed(3));
       final cues = await Process.run(service.ffmpegPath!, [
         '-v', 'error', '-i', earlierOut, '-map', '0:s:0', '-f', 'srt', '-',
       ]);
-      final text = cues.stdout as String;
-      check('subtitle moved earlier drops the cues before the start',
-          text.contains('00:00:01,000 --> 00:00:02,000') &&
-              !text.contains('\num'),
+      final text = (cues.stdout as String).replaceAll('\r\n', '\n');
+      check(
+          'subtitle moved earlier keeps the cue on screen at the start '
+          'and drops the ones before it ($ext)',
+          text.contains('00:00:00,000 --> 00:00:01,000\natravessa\n') &&
+              text.contains('00:00:01,000 --> 00:00:02,000\ndois\n') &&
+              !text.contains('\num\n'),
           text.replaceAll('\n', ' | '));
     }
 
@@ -441,6 +452,54 @@ Future<void> main() async {
               'first=${first.toStringAsFixed(1)}dB '
               'second=${second.toStringAsFixed(1)}dB');
     }
+
+    // -------------------------------------------------- late picture and sound
+    // imagem e som começam 0,5 s depois de outra faixa do arquivo: a imagem
+    // guarda o tempo da origem como o som, e o trecho que acaba antes do
+    // primeiro quadro repete esse quadro em vez de sumir do programa
+    final lateBoth = '${dir.path}/imagem-e-som-atrasados.mkv';
+    await _run(service.ffmpegPath!, [
+      '-y',
+      '-itsoffset', '0.5', '-f', 'lavfi',
+      '-i', 'color=c=black:s=320x240:r=25:d=6,'
+          "geq=lum='if(gte(T,1),255,16)':cb=128:cr=128",
+      '-itsoffset', '0.5', '-f', 'lavfi',
+      '-i', "aevalsrc='if(gte(t,1),0.5*sin(2*PI*440*t),0)':s=48000:d=6",
+      '-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo:d=6.5',
+      '-map', '0', '-map', '1', '-map', '2',
+      '-c:v', 'libx264', '-c:a', 'aac',
+      lateBoth,
+    ]);
+    final whiteAt = await _pictureStart(service.ffmpegPath!, lateBoth);
+    final toneAt = await _soundStart(service.ffmpegPath!, lateBoth);
+    for (final (name, from, to) in [
+      ('late picture and sound cut after they start', 4.0, 5.0),
+      ('late picture and sound with a clip before the first frame', 0.3, 1.0),
+    ]) {
+      final file = await service.probe(lateBoth);
+      ProgramEdit(file, []).cut(from, to);
+      final out = '${dir.path}/${name.replaceAll(' ', '-')}.mkv';
+      result = await service.save(source: file, added: [], outputPath: out);
+      check('$name save succeeds', result.success, result.errorTail);
+      if (!result.success) continue;
+
+      final clips = file.mainVideo!.clips;
+      final fps = clips.first.frameRate;
+      final end = (programDuration(clips) * fps - 1e-6).ceil() / fps;
+      final video = await _streamEnd(service.ffprobePath!, out, 'v:0');
+      check('$name: video lasts ${end.toStringAsFixed(3)}s',
+          (video - end).abs() < 0.5 / fps, video.toStringAsFixed(3));
+      double moved(double t) => t > to ? t - (to - from) : t;
+      final white = await _pictureStart(service.ffmpegPath!, out);
+      final tone = await _soundStart(service.ffmpegPath!, out);
+      check('$name: the picture turns white with the tone, as in the source',
+          (white - moved(whiteAt)).abs() <= 1 / fps + 1e-3 &&
+              (tone - moved(toneAt)).abs() < 0.5 / fps,
+          'white=${white.toStringAsFixed(3)}s '
+              '(expected ${moved(whiteAt).toStringAsFixed(3)}s) '
+              'tone=${tone.toStringAsFixed(3)}s '
+              '(expected ${moved(toneAt).toStringAsFixed(3)}s)');
+    }
   } finally {
     await dir.delete(recursive: true);
   }
@@ -502,6 +561,22 @@ Future<List<(double, double)>> _blackIntervals(
       .allMatches(result.stderr as String)
       .map((m) => (double.parse(m.group(1)!), double.parse(m.group(2)!)))
       .toList();
+}
+
+/// Onde a imagem de [path] deixa de ser preta; NaN quando não tem preto.
+Future<double> _pictureStart(String ffmpeg, String path) async =>
+    (await _blackIntervals(ffmpeg, path)).firstOrNull?.$2 ?? double.nan;
+
+/// Onde o som de 0:a:0 começa (o fim do primeiro silêncio); NaN sem silêncio.
+Future<double> _soundStart(String ffmpeg, String path) async {
+  final result = await Process.run(ffmpeg, [
+    '-hide_banner', '-i', path, '-map', '0:a:0',
+    '-af', 'silencedetect=n=-50dB:d=0.1',
+    '-f', 'null', '-',
+  ]);
+  final match = RegExp(r'silence_end: ([\d.]+)')
+      .firstMatch(result.stderr as String);
+  return match == null ? double.nan : double.parse(match.group(1)!);
 }
 
 /// Mean volume (dB) of [path] between [from] and [to] after [filter].

@@ -141,7 +141,8 @@ single command per save:
    exactly with `trim`, scaled and padded into the original frame when it
    comes from another file, and joined with `concat`; chapters are dropped
    because they would point to the wrong places. Subtitles cut by the edit
-   are extracted, their cues moved piece by piece, and muxed back.
+   (and text subtitles moved earlier, so the cue on screen at the new start
+   is kept) are extracted, their cues moved piece by piece, and muxed back.
 5. Subtitles are converted when the target container demands it (`srt` →
    `mov_text` for MP4, exotic text formats → `srt` for MKV); image-based
    subtitles that cannot exist in MP4 are dropped with an explicit warning.

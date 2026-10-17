@@ -197,7 +197,8 @@ void main() {
       expect(joined, contains('-copypriorss:a:0 0'));
     });
 
-    test('a subtitle moved earlier drops the cues before the start', () {
+    test('a text subtitle moved earlier is rewritten, as a cut one is', () {
+      // copiar com -ss perderia a fala que já está na tela no novo começo
       final sub = MediaTrack(
         streamIndex: 2,
         type: TrackType.subtitle,
@@ -215,20 +216,49 @@ void main() {
         title: 'Legenda PT',
         durationSeconds: 0,
       )..offsetSeconds = -1.5;
+      final file = _file([_video(), _audio(1, 0), sub]);
 
-      final joined = service
-          .buildSaveArgs(
-            source: _file([_video(), _audio(1, 0), sub]),
-            added: [external],
-            outputPath: '/tmp/out.mkv',
-          )
-          .args
-          .join(' ');
+      expect(FfmpegService.subtitlesToRetime(file, [external]),
+          [sub, external]);
+      final result = service.buildSaveArgs(
+        source: file,
+        added: [external],
+        outputPath: '/tmp/out.mp4',
+        subtitleFiles: {
+          sub: '/tmp/adiantada.srt',
+          external: '/tmp/adiantada-pt.srt',
+        },
+      );
+      final joined = result.args.join(' ');
+      expect(joined, contains('-i /tmp/adiantada.srt'));
+      expect(joined, contains('-i /tmp/adiantada-pt.srt'));
+      expect(joined, isNot(contains('-ss')));
+      expect(joined, isNot(contains('-copypriorss')));
+      expect(joined, contains('-c:s:0 mov_text'));
+      expect(joined, contains('-c:s:1 mov_text'));
+      expect(result.warnings, isEmpty);
+    });
+
+    test('a bitmap subtitle moved earlier is copied from its new start', () {
+      final pgs = MediaTrack(
+        streamIndex: 2,
+        type: TrackType.subtitle,
+        typeIndex: 0,
+        codec: 'HDMV_PGS_SUBTITLE',
+        details: '',
+        originalTitle: 'PGS',
+        durationSeconds: 600,
+      )..offsetSeconds = -2;
+      final file = _file([_video(), _audio(1, 0), pgs]);
+
+      expect(FfmpegService.subtitlesToRetime(file, []), isEmpty);
+      final result = service.buildSaveArgs(
+          source: file, added: [], outputPath: '/tmp/out.mkv');
+      final joined = result.args.join(' ');
       expect(joined, contains('-ss 2.000 -i $kSource'));
       expect(joined, contains('-map 1:2'));
       expect(joined, contains('-copypriorss:s:0 0'));
-      expect(joined, contains('-ss 1.500 -i /tmp/sub.srt'));
-      expect(joined, contains('-copypriorss:s:1 0'));
+      expect(result.warnings, isEmpty);
     });
 
     test('subtitle offset uses a flagged duplicate input', () {
@@ -700,14 +730,33 @@ void main() {
       final filter = result.args[result.args.indexOf('-filter_complex') + 1];
 
       expect(joined, contains('-ss 90.000 -i $kSource'));
-      expect(filter, contains('[1:v:0]trim=duration=510.000,setpts=PTS-STARTPTS,'
-          'setsar=1/1,fps=2997/100,tpad=stop=-1:stop_mode=clone,'
+      expect(filter, contains('[1:v:0]trim=end=510.000:end_frame=1,'
+          'setsar=1/1,fps=2997/100:start_time=0,tpad=stop=-1:stop_mode=clone,'
           'trim=end_frame=15285[pv0]'));
       expect(filter, contains('[pv0]concat=n=1:v=1:a=0[program]'));
       expect(joined, contains('-map [program]'));
       expect(joined, contains('-c:v:0 libsvtav1 -preset:v:0 8 -crf:v:0 30'));
       expect(joined, contains('-map_chapters -1'));
       expect(result.warnings.first, contains('AV1'));
+    });
+
+    test('a clip keeps the time of its source, as its audio does', () {
+      // vídeo que começa atrasado no arquivo não é puxado pro começo do
+      // trecho enquanto o som guarda o atraso
+      final file = _file([_programVideo(), _audio(1, 0)]);
+      ProgramEdit(file, []).cut(240, 300);
+
+      final args = service
+          .buildSaveArgs(source: file, added: [], outputPath: '/tmp/out.mkv')
+          .args;
+      final filter = args[args.indexOf('-filter_complex') + 1];
+      expect(filter, isNot(contains('STARTPTS')));
+      expect(filter, contains('[1:v:0]trim=end=240.000:end_frame=1,setsar=1/1,'
+          'fps=2997/100:start_time=0,'));
+      expect(filter, contains('[2:v:0]trim=end=300.000:end_frame=1,setsar=1/1,'
+          'fps=2997/100:start_time=0,'));
+      expect(filter, contains('[0:a:0]atrim=start=0.000:end=240.000,'
+          'asetpts=PTS-0.000/TB,aresample=48000:first_pts=0,'));
     });
 
     test('an inserted video is fitted into the program frame', () {
@@ -730,7 +779,8 @@ void main() {
       final filter = result.args[result.args.indexOf('-filter_complex') + 1];
 
       expect(filter, contains(
-          'scale=1432:806,pad=1432:1080:0:137,setsar=1/1,fps=2997/100,'
+          'scale=1432:806,pad=1432:1080:0:137,setsar=1/1,'
+          'fps=2997/100:start_time=0,'
           'tpad=stop=-1:stop_mode=clone,trim=end_frame=2518[pv0]'));
       expect(filter, contains('[pv0][pv1]concat=n=2:v=1:a=0[program]'));
       expect(filter, contains('[3:a:0]atrim=start=0.000:end=84.000'));
@@ -749,8 +799,8 @@ void main() {
       );
       final filter = result.args[result.args.indexOf('-filter_complex') + 1];
 
-      expect(filter, contains('[1:v:0]trim=duration=600.000,'
-          'setpts=PTS-STARTPTS,setsar=32/27,fps=2997/100,'
+      expect(filter, contains('[1:v:0]trim=end=600.000:end_frame=1,'
+          'setsar=32/27,fps=2997/100:start_time=0,'
           'tpad=start=75:color=black:stop=-1:stop_mode=clone,'
           'trim=end_frame=18057[pv0]'));
       expect(filter, isNot(contains('color=c=')));
@@ -771,10 +821,10 @@ void main() {
       final filter = result.args[result.args.indexOf('-filter_complex') + 1];
 
       expect(joined, contains('-ss 300.000 -i $kSource'));
-      expect(filter, contains('fps=2997/100,tpad=stop=-1:stop_mode=clone,'
-          'trim=end_frame=8991[pv0]'));
-      expect(filter, contains('[2:v:0]trim=duration=300.000,'
-          'setpts=PTS-STARTPTS,setsar=1/1,fps=2997/100,'
+      expect(filter, contains('fps=2997/100:start_time=0,'
+          'tpad=stop=-1:stop_mode=clone,trim=end_frame=8991[pv0]'));
+      expect(filter, contains('[2:v:0]trim=end=300.000:end_frame=1,'
+          'setsar=1/1,fps=2997/100:start_time=0,'
           'tpad=start=300:color=black:stop=-1:stop_mode=clone,'
           'trim=end_frame=9291[pv1]'));
       expect(filter, contains('[pv0][pv1]concat=n=2:v=1:a=0[program]'));
@@ -796,13 +846,13 @@ void main() {
       );
       final filter = result.args[result.args.indexOf('-filter_complex') + 1];
 
-      expect(filter, contains('fps=25/1,tpad=stop=-1:stop_mode=clone,'
-          'trim=end_frame=75[pv0]'));
-      expect(filter, contains('fps=25/1,tpad=start=11:color=black:'
+      expect(filter, contains('fps=25/1:start_time=0,'
+          'tpad=stop=-1:stop_mode=clone,trim=end_frame=75[pv0]'));
+      expect(filter, contains('fps=25/1:start_time=0,tpad=start=11:color=black:'
           'stop=-1:stop_mode=clone,trim=end_frame=86[pv1]'));
-      expect(filter, contains('fps=25/1,tpad=start=10:color=black:'
+      expect(filter, contains('fps=25/1:start_time=0,tpad=start=10:color=black:'
           'stop=-1:stop_mode=clone,trim=end_frame=85[pv2]'));
-      expect(filter, contains('fps=25/1,tpad=start=10:color=black:'
+      expect(filter, contains('fps=25/1:start_time=0,tpad=start=10:color=black:'
           'stop=-1:stop_mode=clone,trim=end_frame=85[pv3]'));
     });
 
