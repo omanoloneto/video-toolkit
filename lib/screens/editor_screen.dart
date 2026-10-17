@@ -22,6 +22,8 @@ import '../widgets/properties_panel.dart';
 import '../widgets/save_dialog.dart';
 import '../widgets/timeline_panel.dart';
 
+const kLogoAsset = 'assets/logo.png';
+
 class EditorScreen extends StatefulWidget {
   const EditorScreen({super.key, this.initialPath});
 
@@ -854,8 +856,8 @@ class _EditorScreenState extends State<EditorScreen> {
           Expanded(
             child: Row(
               children: [
-                Icon(ThemeIcons.of(context).video,
-                    size: 16, color: spec.topBarText),
+                Image.asset(kLogoAsset,
+                    width: 18, height: 18, filterQuality: FilterQuality.medium),
                 const SizedBox(width: 8),
                 Text('Video Toolkit',
                     style: theme.typography.bodyStrong
@@ -963,8 +965,8 @@ class _EditorScreenState extends State<EditorScreen> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(ThemeIcons.of(context).video, size: 56,
-              color: theme.resources.textFillColorTertiary),
+          Image.asset(kLogoAsset,
+              width: 72, height: 72, filterQuality: FilterQuality.medium),
           const SizedBox(height: 16),
           Text('Nenhum vídeo aberto', style: theme.typography.subtitle),
           const SizedBox(height: 8),
