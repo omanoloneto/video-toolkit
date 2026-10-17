@@ -27,7 +27,6 @@ class PreviewPanel extends StatelessWidget {
     required this.monitorOptions,
     required this.monitorLane,
     required this.onMonitorChanged,
-    this.notice,
   });
 
   final VideoController? controller;
@@ -43,9 +42,6 @@ class PreviewPanel extends StatelessWidget {
   final Object? monitorLane;
   final ValueChanged<Object?> onMonitorChanged;
 
-  /// Aviso por cima da imagem (ex.: o cursor está num vídeo inserido).
-  final String? notice;
-
   @override
   Widget build(BuildContext context) {
     final theme = FluentTheme.of(context);
@@ -59,30 +55,10 @@ class PreviewPanel extends StatelessWidget {
             child: controller == null
                 ? Icon(ThemeIcons.of(context).video, size: 48,
                     color: theme.resources.textFillColorTertiary)
-                : Stack(
-                    fit: StackFit.expand,
-                    children: [
-                      Video(
-                        controller: controller!,
-                        controls: NoVideoControls,
-                        fill: Colors.black,
-                      ),
-                      if (notice != null)
-                        ColoredBox(
-                          color: const Color(0xE6000000),
-                          child: Center(
-                            child: Padding(
-                              padding: const EdgeInsets.all(24),
-                              child: Text(
-                                notice!,
-                                textAlign: TextAlign.center,
-                                style: theme.typography.body
-                                    ?.copyWith(color: Colors.white),
-                              ),
-                            ),
-                          ),
-                        ),
-                    ],
+                : Video(
+                    controller: controller!,
+                    controls: NoVideoControls,
+                    fill: Colors.black,
                   ),
           ),
         ),
