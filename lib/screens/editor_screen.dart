@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:ui' show AppExitResponse;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/services.dart';
@@ -70,14 +71,18 @@ class _EditorScreenState extends State<EditorScreen> {
   Future<void>? _opening;
   final _warnedFiles = <String>{};
 
+  late final AppLifecycleListener _exitListener;
+
   @override
   void initState() {
     super.initState();
+    _exitListener = AppLifecycleListener(onExitRequested: _releaseForExit);
     _checkFfmpeg();
   }
 
   @override
   void dispose() {
+    _exitListener.dispose();
     _positionSub?.cancel();
     _playingSub?.cancel();
     _player?.dispose();
@@ -86,12 +91,39 @@ class _EditorScreenState extends State<EditorScreen> {
     super.dispose();
   }
 
-  void _releaseAudio() {
+  // o macOS fecha o app junto com a última janela sem desmontar a tela: sem
+  // isso o FFmpeg segue copiando e a pasta temporária fica
+  Future<AppExitResponse> _releaseForExit() async {
+    _previewTimer?.cancel();
+    await Future.wait([_releasePlayer(), _releaseAudio()]);
+    return AppExitResponse.exit;
+  }
+
+  Future<void> _releaseAudio() async {
     final audio = _audio;
     _audio = null;
     if (audio == null) return;
     audio.revision.removeListener(_onAudioReady);
-    audio.dispose();
+    await audio.dispose();
+  }
+
+  Future<void> _releasePlayer() async {
+    final player = _player;
+    final subscriptions = [_positionSub, _playingSub];
+    _positionSub = null;
+    _playingSub = null;
+    _shownPlan = null;
+    if (mounted) {
+      setState(() {
+        _player = null;
+        _videoController = null;
+        _isPlaying = false;
+      });
+    }
+    for (final subscription in subscriptions) {
+      await subscription?.cancel();
+    }
+    await player?.dispose();
   }
 
   void _onAudioReady() {
@@ -144,18 +176,7 @@ class _EditorScreenState extends State<EditorScreen> {
   // ------------------------------------------------------------- playback
 
   Future<void> _initPlayer() async {
-    await _positionSub?.cancel();
-    await _playingSub?.cancel();
-    final old = _player;
-    if (mounted) {
-      setState(() {
-        _player = null;
-        _videoController = null;
-        _isPlaying = false;
-      });
-    }
-    _shownPlan = null;
-    await old?.dispose();
+    await _releasePlayer();
 
     final player = Player();
     final controller = VideoController(player);
