@@ -62,7 +62,6 @@ class _EditorScreenState extends State<EditorScreen> {
   PreviewPlan? _shownPlan;
   Timer? _previewTimer;
   int _previewRun = 0;
-  Directory? _edlDir;
   final _warnedFiles = <String>{};
 
   @override
@@ -78,8 +77,6 @@ class _EditorScreenState extends State<EditorScreen> {
     _player?.dispose();
     _previewTimer?.cancel();
     _releaseAudio();
-    final edlDir = _edlDir;
-    if (edlDir != null) edlDir.delete(recursive: true).ignore();
     super.dispose();
   }
 
@@ -275,19 +272,24 @@ class _EditorScreenState extends State<EditorScreen> {
     // uma montagem mais nova cancela a que ainda está gravando a lista
     final run = ++_previewRun;
     if (plan == _shownPlan) return;
-    final String media;
+    final String? media;
     final String audioId;
     switch (plan) {
       case SourcePreview(:final path, :final audioTrack):
         media = path;
         audioId = audioTrack?.toString() ?? 'no';
       case EdlPreview(:final edl, :final hasAudio):
-        media = await _writeEdl(edl);
+        media = await audio.writeEdl(edl);
         audioId = hasAudio ? 'auto' : 'no';
       case PendingPreview():
         return;
     }
-    if (run != _previewRun || !mounted || !identical(player, _player)) return;
+    if (media == null ||
+        run != _previewRun ||
+        !mounted ||
+        !identical(player, _player)) {
+      return;
+    }
     _shownPlan = plan;
     final native = player.platform;
     if (native is NativePlayer) await native.setProperty('aid', audioId);
@@ -299,15 +301,6 @@ class _EditorScreenState extends State<EditorScreen> {
       Media(media, start: Duration(milliseconds: (at * 1000).round())),
       play: _isPlaying,
     );
-  }
-
-  Future<String> _writeEdl(String edl) async {
-    final dir = _edlDir ??= await Directory.systemTemp.createTemp('vt-preview-edl-');
-    // cada montagem num arquivo novo: o player pode ainda estar abrindo a
-    // anterior (a pasta some quando o editor fecha)
-    final file = File(p.join(dir.path, 'programa-$_previewRun.edl'));
-    await file.writeAsString(edl);
-    return file.path;
   }
 
   void _warnSilenced(Set<AudioSource> sources) {

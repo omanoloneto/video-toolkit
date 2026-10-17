@@ -260,9 +260,11 @@ void main() {
       final folder = p.dirname(cache.extracted(toneFirst)!);
       expect(p.basename(folder), startsWith('vt-preview-'));
       expect(p.dirname(cache.silence()!), folder);
+      expect(p.dirname((await cache.writeEdl('# mpv EDL v0\n'))!), folder);
       await cache.dispose();
       expect(Directory(folder).existsSync(), isFalse);
       expect(cache.extracted(toneFirst), isNull);
+      expect(await cache.writeEdl('# mpv EDL v0\n'), isNull);
     }, timeout: const Timeout(Duration(minutes: 1)));
 
     test('a stream that cannot be copied does not hold back the others',
@@ -303,6 +305,74 @@ void main() {
       // o que as execuções que falharam gravaram não fica ocupando o disco
       expect(Directory(p.dirname(copy)).listSync().map((e) => e.path), [copy]);
       expect(cache.extracted(bad), isNull);
+    }, timeout: const Timeout(Duration(minutes: 1)));
+
+    test('writes each edit list anew and starts over when a sweep takes its '
+        'folder', () async {
+      final ffmpeg = FfmpegService();
+      if (!await ffmpeg.locate()) {
+        markTestSkipped('needs ffmpeg and ffprobe installed');
+        return;
+      }
+      final dir = await Directory.systemTemp.createTemp('vt-audio-cache-');
+      addTearDown(() => dir.delete(recursive: true));
+      final tone = p.join(dir.path, 'tone.mka');
+      final made = await Process.run(ffmpeg.ffmpegPath!, [
+        '-hide_banner', '-loglevel', 'error', '-y',
+        '-f', 'lavfi', '-i', 'sine=f=440:d=2:r=48000',
+        '-c:a', 'flac',
+        tone,
+      ]);
+      expect(made.exitCode, 0, reason: '${made.stderr}');
+
+      const edl = '# mpv EDL v0\n%9%/c/0.mka,0.000000,1.000000\n';
+      final cache = AudioCache(ffmpeg);
+      addTearDown(cache.dispose);
+      final source = AudioSource(path: tone, audioTypeIndex: 0);
+      String? black() =>
+          cache.blackVideo(width: 64, height: 48, sarNum: 1, sarDen: 1);
+      bool ready() =>
+          cache.extracted(source) != null &&
+          cache.silence() != null &&
+          black() != null;
+      await _until(cache, ready);
+      final first = (await cache.writeEdl(edl))!;
+      final second = (await cache.writeEdl(edl))!;
+      final folder = Directory(p.dirname(first));
+      expect(p.dirname(cache.extracted(source)!), folder.path);
+      // o player pode ainda estar abrindo a lista anterior
+      expect(second, isNot(first));
+      expect(p.dirname(second), folder.path);
+      expect(File(first).readAsStringSync(), edl);
+
+      // parada há mais de 12 h, a pasta sai na limpeza que outra sessão faz
+      final touched =
+          await Process.run('touch', ['-t', '202001010000', folder.path]);
+      expect(touched.exitCode, 0, reason: '${touched.stderr}');
+      final other = AudioCache(ffmpeg);
+      addTearDown(other.dispose);
+      await other.writeEdl(edl);
+      final limit = DateTime.now().add(const Duration(seconds: 10));
+      while (folder.existsSync()) {
+        if (DateTime.now().isAfter(limit)) fail('the sweep left ${folder.path}');
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+
+      final before = cache.revision.value;
+      final healed = (await cache.writeEdl(edl))!;
+      final renewed = p.dirname(healed);
+      expect(renewed, isNot(folder.path));
+      expect(p.basename(renewed), startsWith('vt-preview-'));
+      expect(File(healed).readAsStringSync(), edl);
+      // o que a pasta levou é refeito na nova, e quem ouve fica sabendo
+      expect(cache.revision.value, greaterThan(before));
+      await _until(cache, ready);
+      for (final path in [cache.extracted(source)!, cache.silence()!, black()!]) {
+        expect(p.dirname(path), renewed);
+        expect(File(path).existsSync(), isTrue, reason: path);
+      }
+      await cache.dispose();
+      expect(Directory(renewed).existsSync(), isFalse);
     }, timeout: const Timeout(Duration(minutes: 1)));
 
     test('makes one black video per frame, with its size and pixel shape',

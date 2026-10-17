@@ -117,15 +117,17 @@ class PeakBuilder {
 
 /// Áudio derivado dos arquivos em edição: cada faixa copiada sozinha (o
 /// player da prévia só aceita uma faixa por arquivo num grupo de áudio), a
-/// forma de onda dela pra linha do tempo e o que tapa os vãos da prévia: um
-/// silêncio no som e um vídeo preto na imagem.
+/// forma de onda dela pra linha do tempo, o que tapa os vãos da prévia (um
+/// silêncio no som e um vídeo preto na imagem) e as listas de cortes que a
+/// prévia abre.
 class AudioCache {
   AudioCache(this._ffmpeg);
 
   final FfmpegService _ffmpeg;
 
   /// Sobe quando uma cópia, uma forma de onda, o silêncio ou um vídeo preto
-  /// fica pronto (ou falha).
+  /// fica pronto (ou falha) e quando a pasta temporária some e os arquivos
+  /// dela vão ser refeitos.
   final ValueNotifier<int> revision = ValueNotifier(0);
 
   final _seen = <AudioSource>{};
@@ -204,6 +206,21 @@ class AudioCache {
 
   /// A cópia falhou: quem pediu segue sem ela em vez de esperar.
   bool failed(AudioSource source) => _failed.contains(source);
+
+  /// Grava a lista de cortes [edl] num arquivo novo da pasta de trabalho (o
+  /// player pode ainda estar abrindo o anterior) e devolve o caminho; null se
+  /// não deu.
+  Future<String?> writeEdl(String edl) async {
+    final folder = await _workFolder();
+    if (folder == null) return null;
+    final file = File(p.join(folder.path, 'program-${_nextName++}.edl'));
+    try {
+      await file.writeAsString(edl);
+      return file.path;
+    } on FileSystemException {
+      return null;
+    }
+  }
 
   /// Mata os FFmpeg em andamento, apaga a pasta temporária e encerra
   /// [revision]. Chamar de novo não faz nada.
@@ -371,8 +388,26 @@ class AudioCache {
   }
 
   Future<Directory?> _workFolder() async {
-    if (_ffmpeg.ffmpegPath == null) return null;
-    return _folder ??= _createFolder();
+    if (_ffmpeg.ffmpegPath == null || _disposed) return null;
+    final current = _folder ??= _createFolder();
+    final folder = await current;
+    if (folder == null || await folder.exists()) return folder;
+    if (_disposed) return null;
+    if (identical(_folder, current)) _startOver();
+    return await _folder;
+  }
+
+  // a limpeza de outra sessão levou a pasta e o que foi feito nela: refaz
+  // numa nova
+  void _startOver() {
+    _folder = _createFolder();
+    _seen.removeAll(_copies.keys);
+    _copies.clear();
+    _silenceStarted = false;
+    _silence = null;
+    _blackStarted.clear();
+    _blacks.clear();
+    revision.value++;
   }
 
   static Future<Directory?> _createFolder() async {
