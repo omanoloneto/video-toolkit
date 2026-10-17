@@ -165,20 +165,53 @@ void main() {
         () async => (await mpvTime() - 5).abs() < 0.2);
 
     // no fim do programa, play logo depois de editar toca a edição do começo
+    bool playingFromStart() {
+      final position = player.state.position;
+      return player.state.playing &&
+          position > const Duration(milliseconds: 300) &&
+          position < const Duration(seconds: 4);
+    }
     for (var i = 0; i < 3; i++) {
       press('Avançar 5 s')();
     }
     await waitFor(tester, 'the end', () async => await mpvTime() > 10);
     await tester.drag(audioStart, const Offset(-40, 0));
     await tester.sendKeyEvent(LogicalKeyboardKey.space);
-    await waitFor(tester, 'playback from the start', () {
-      final position = player.state.position;
-      return player.state.playing &&
-          position > const Duration(milliseconds: 300) &&
-          position < const Duration(seconds: 4);
-    });
+    await waitFor(tester, 'playback from the start', playingFromStart);
+    // o recomeço é decidido antes de recarregar: a edição já abre no começo
+    expect(player.state.playlist.medias.single.start, Duration.zero);
     await tester.sendKeyEvent(LogicalKeyboardKey.space);
     await waitFor(tester, 'pause after the restart', () => !player.state.playing);
+
+    // play no fim com a edição ainda abrindo espera a carga; com a UI presa
+    // quando ela termina (forçada aqui), o mpv tocava o fim e parava
+    for (var i = 0; i < 3; i++) {
+      press('Avançar 5 s')();
+    }
+    await waitFor(tester, 'the end again', () async => await mpvTime() > 10);
+    final atEnd = loaded();
+    final play = press('Reproduzir (espaço)');
+    var played = false;
+    final onReload = player.stream.playlist.listen((playlist) {
+      final uri = playlist.medias.firstOrNull?.uri;
+      if (played || uri == null || uri == atEnd) return;
+      played = true;
+      play();
+    });
+    var stalled = false;
+    final onLoaded = player.stream.duration.listen((duration) {
+      if (!played || stalled || duration <= Duration.zero) return;
+      stalled = true;
+      sleep(const Duration(seconds: 1));
+    });
+    await tester.drag(audioStart, const Offset(40, 0));
+    await waitFor(tester, 'a play while the edit loads', () => stalled);
+    await onReload.cancel();
+    await onLoaded.cancel();
+    await waitFor(tester, 'playback from the start after the load',
+        playingFromStart);
+    await tester.sendKeyEvent(LogicalKeyboardKey.space);
+    await waitFor(tester, 'pause after the load', () => !player.state.playing);
 
     // o macOS sai sem desmontar a tela: o pedido de saída leva a pasta
     final folder = File(loaded()).parent;
