@@ -7,6 +7,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:video_toolkit/models/program.dart';
 import 'package:video_toolkit/models/tracks.dart';
 import 'package:video_toolkit/services/ffmpeg_service.dart';
 
@@ -133,6 +134,79 @@ Future<void> main() async {
       check('merge with leading gap is silent until the first piece',
           sound - silence > 20,
           'silence=${silence.toStringAsFixed(1)}dB sound=${sound.toStringAsFixed(1)}dB');
+    }
+
+    // -------------------------------------------------- program edits
+    // corta 1–2 s, insere um vídeo de outro tamanho (com som) no começo e
+    // confere imagem, duração, áudio e legenda
+    final subs = '${dir.path}/legenda.srt';
+    await File(subs).writeAsString(
+        '1\n00:00:00,500 --> 00:00:01,000\num\n\n'
+        '2\n00:00:03,000 --> 00:00:04,000\ndois\n');
+    final progSrc = '${dir.path}/programa.mkv';
+    await _run(service.ffmpegPath!, [
+      '-y',
+      '-f', 'lavfi', '-i', 'testsrc=duration=6:size=320x240:rate=25',
+      '-f', 'lavfi', '-i', 'sine=frequency=440:duration=6',
+      '-i', subs,
+      '-map', '0', '-map', '1', '-map', '2',
+      '-c:v', 'libx264', '-c:a', 'aac', '-c:s', 'srt',
+      progSrc,
+    ]);
+    final insertSrc = '${dir.path}/abertura.mp4';
+    await _run(service.ffmpegPath!, [
+      '-y',
+      '-f', 'lavfi', '-i', 'testsrc2=duration=2:size=640x360:rate=30',
+      '-f', 'lavfi', '-i', 'sine=frequency=1320:duration=2',
+      '-c:v', 'libx264', '-c:a', 'aac', '-shortest',
+      insertSrc,
+    ]);
+
+    final program = await service.probe(progSrc);
+    final insertable = await service.probeVideoClip(insertSrc);
+    check('insertable video is probed', insertable != null);
+    final edit = ProgramEdit(program, [])..cut(1, 2);
+    edit.insert(
+      insertable!.clip,
+      at: 0,
+      audio: AudioSource(path: insertSrc, audioTypeIndex: 0),
+      audioDuration: insertable.audioDuration,
+    );
+
+    final progOut = '${dir.path}/programa-editado.mkv';
+    result =
+        await service.save(source: program, added: [], outputPath: progOut);
+    check('edited program save succeeds', result.success, result.errorTail);
+    if (result.success) {
+      streams = await _probeStreams(service.ffprobePath!, progOut);
+      final videoOut =
+          streams.firstWhere((s) => s['codec_type'] == 'video');
+      check('edited program is AV1 in the source frame',
+          videoOut['codec_name'] == 'av1' &&
+              videoOut['width'] == 320 &&
+              videoOut['height'] == 240,
+          '${videoOut['codec_name']} ${videoOut['width']}x${videoOut['height']}');
+      final duration = await _mediaDuration(service.ffprobePath!, progOut);
+      check('edited program lasts 6 - 1 + 2 = 7s', (duration - 7).abs() < 0.3,
+          duration.toStringAsFixed(2));
+
+      const hp = 'highpass=f=900,highpass=f=900';
+      final inserted =
+          await _meanVolume(service.ffmpegPath!, progOut, 0.3, 1.7, hp);
+      final original =
+          await _meanVolume(service.ffmpegPath!, progOut, 3.0, 5.0, hp);
+      check('inserted sound plays where the inserted video is',
+          inserted - original > 8,
+          'inserido=${inserted.toStringAsFixed(1)}dB original=${original.toStringAsFixed(1)}dB');
+
+      final cues = await Process.run(service.ffmpegPath!, [
+        '-v', 'error', '-i', progOut, '-map', '0:s:0', '-f', 'srt', '-',
+      ]);
+      final text = cues.stdout as String;
+      check('subtitles follow the cut and the insertion',
+          text.contains('00:00:02,500 --> 00:00:03,000') &&
+              text.contains('00:00:04,000 --> 00:00:05,000'),
+          text.replaceAll('\n', ' | '));
     }
   } finally {
     await dir.delete(recursive: true);

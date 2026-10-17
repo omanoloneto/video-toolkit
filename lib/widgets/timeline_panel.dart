@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:fluent_ui/fluent_ui.dart';
 import 'package:path/path.dart' as p;
 
+import '../models/program.dart';
 import '../models/tracks.dart';
 import '../theme/app_themes.dart';
 import '../theme/theme_icons.dart';
@@ -10,14 +11,19 @@ import '../theme/theme_icons.dart';
 /// What is currently selected on the timeline: a lane (track) and,
 /// optionally, one audio segment inside it.
 class TimelineSelection {
-  const TimelineSelection({required this.lane, this.segment});
+  const TimelineSelection({required this.lane, this.segment, this.clip});
 
   /// A [MediaTrack] or [ExternalTrack].
   final Object lane;
   final AudioSegment? segment;
 
+  /// Trecho do vídeo principal.
+  final VideoClip? clip;
+
   bool sameAs(Object lane, [AudioSegment? segment]) =>
-      identical(this.lane, lane) && identical(this.segment, segment);
+      identical(this.lane, lane) &&
+      identical(this.segment, segment) &&
+      clip == null;
 }
 
 String formatTimelineTime(double seconds) {
@@ -65,6 +71,7 @@ class TimelinePanel extends StatefulWidget {
     required this.onModelChanged,
     required this.onLaneEmptied,
     required this.onEditSubtitleOffset,
+    required this.onDeleteVideoClip,
   });
 
   final MediaFileInfo file;
@@ -86,6 +93,9 @@ class TimelinePanel extends StatefulWidget {
   /// Called when the last segment of an audio lane was deleted.
   final void Function(Object lane) onLaneEmptied;
   final void Function(Object subtitleRef) onEditSubtitleOffset;
+
+  /// Remove o trecho do programa inteiro (quem chama confirma).
+  final void Function(VideoClip clip) onDeleteVideoClip;
 
   @override
   State<TimelinePanel> createState() => TimelinePanelState();
@@ -175,6 +185,7 @@ class TimelinePanelState extends State<TimelinePanel> {
             duration: track.durationSeconds > 0
                 ? track.durationSeconds
                 : file.durationSeconds,
+            clips: track.clips.isEmpty ? null : track.clips,
           ));
         case TrackType.audio:
           lanes.add(_Lane(
@@ -195,10 +206,8 @@ class TimelinePanelState extends State<TimelinePanel> {
                 ? track.title
                 : 'Legenda ${track.typeIndex + 1}',
             color: subtitleColor,
-            duration: track.durationSeconds > 0
-                ? track.durationSeconds
-                : file.durationSeconds,
             offset: track.offsetSeconds,
+            pieces: track.pieces,
           ));
       }
     }
@@ -219,10 +228,8 @@ class TimelinePanelState extends State<TimelinePanel> {
           type: TrackType.subtitle,
           label: track.title,
           color: subtitleColor,
-          duration: track.durationSeconds > 0
-              ? track.durationSeconds
-              : file.durationSeconds,
           offset: track.offsetSeconds,
+          pieces: track.pieces,
           isExternal: true,
         ));
       }
@@ -230,13 +237,25 @@ class TimelinePanelState extends State<TimelinePanel> {
     return lanes;
   }
 
+  /// Onde a imagem acaba: o programa editado, ou o próprio arquivo.
+  double get _contentEnd {
+    final video = widget.file.mainVideo;
+    return video == null
+        ? widget.file.durationSeconds
+        : programDuration(video.clips);
+  }
+
   ({double start, double end}) _viewRange(List<_Lane> lanes) {
     var start = 0.0;
-    var end = widget.file.durationSeconds;
+    var end = _contentEnd;
     for (final lane in lanes) {
-      if (lane.segments != null) {
-        for (final seg in lane.segments!) {
-          end = math.max(end, seg.timelineEnd);
+      final pieces = lane.segments ?? lane.clips ?? lane.pieces;
+      if (pieces != null) {
+        for (final piece in pieces) {
+          start = math.min(start, piece.timelineStart);
+          if (piece.timelineEnd.isFinite) {
+            end = math.max(end, piece.timelineEnd);
+          }
         }
       } else {
         start = math.min(start, lane.offset);
@@ -268,10 +287,29 @@ class TimelinePanelState extends State<TimelinePanel> {
     return segments.where((s) => s.containsTimeline(_playhead)).firstOrNull;
   }
 
-  bool get _canSplit => _splitTarget != null;
+  List<VideoClip>? _clipsOf(Object? lane) =>
+      lane is MediaTrack && lane.clips.isNotEmpty ? lane.clips : null;
+
+  VideoClip? get _clipSplitTarget => _clipsOf(_selectedLane)
+      ?.where((c) => c.containsTimeline(_playhead))
+      .firstOrNull;
+
+  bool get _canSplit => _splitTarget != null || _clipSplitTarget != null;
+
+  bool get _canDelete =>
+      _selectedSegment != null || widget.selection?.clip != null;
 
   void _split() {
     final lane = _selectedLane;
+    final clip = _clipSplitTarget;
+    final clips = _clipsOf(lane);
+    if (lane != null && clip != null && clips != null) {
+      if (splitSegment(clips, clip, _playhead)) {
+        widget.onSelectionChanged(TimelineSelection(lane: lane, clip: clip));
+        widget.onModelChanged();
+      }
+      return;
+    }
     final seg = _splitTarget;
     final segments = _segmentsOf(lane);
     if (lane == null || seg == null || segments == null) return;
@@ -279,6 +317,15 @@ class TimelinePanelState extends State<TimelinePanel> {
       widget.onSelectionChanged(TimelineSelection(lane: lane, segment: seg));
       widget.onModelChanged();
     }
+  }
+
+  void _deleteSelected() {
+    final clip = widget.selection?.clip;
+    if (clip != null) {
+      widget.onDeleteVideoClip(clip);
+      return;
+    }
+    _deleteSelectedSegment();
   }
 
   void _deleteSelectedSegment() {
@@ -499,8 +546,7 @@ class TimelinePanelState extends State<TimelinePanel> {
           Tooltip(
             message: 'Excluir trecho selecionado (Del)',
             child: Button(
-              onPressed:
-                  _selectedSegment != null ? _deleteSelectedSegment : null,
+              onPressed: _canDelete ? _deleteSelected : null,
               child: Row(mainAxisSize: MainAxisSize.min, children: [
                 Icon(ThemeIcons.of(context).delete, size: 13),
                 SizedBox(width: 6),
@@ -681,13 +727,29 @@ class TimelinePanelState extends State<TimelinePanel> {
       ),
     ];
 
-    if (lane.segments != null) {
+    if (lane.clips != null) {
+      for (final clip in lane.clips!) {
+        children.add(_buildVideoClip(theme, lane, clip, xOf, pps));
+      }
+    } else if (lane.segments != null) {
       final segments = lane.segments!;
       for (final seg in segments) {
         children.add(_buildSegmentClip(theme, lane, seg, segments, xOf, pps));
       }
+    } else if (lane.pieces != null) {
+      // legenda: cada pedaço que sobrou do corte vira uma barra; um pedaço
+      // sem fim vai até o fim do conteúdo
+      final end = _contentEnd;
+      for (var i = 0; i < lane.pieces!.length; i++) {
+        final piece = lane.pieces![i];
+        children.add(_buildBarClip(theme, lane, xOf, pps,
+            start: piece.timelineStart,
+            end: math.min(piece.timelineEnd, end),
+            first: i == 0));
+      }
     } else {
-      children.add(_buildBarClip(theme, lane, xOf, pps));
+      children.add(_buildBarClip(theme, lane, xOf, pps,
+          start: lane.offset, end: lane.offset + lane.duration, first: true));
     }
 
     return SizedBox(
@@ -793,14 +855,61 @@ class TimelinePanelState extends State<TimelinePanel> {
     return candidate;
   }
 
-  Widget _buildBarClip(FluentThemeData theme, _Lane lane,
+  Widget _buildVideoClip(FluentThemeData theme, _Lane lane, VideoClip clip,
       double Function(double) xOf, double pps) {
+    final selected = identical(widget.selection?.clip, clip);
+    final inserted = clip.path != widget.file.path;
+    final width = math.max(clip.duration * pps, 12.0);
+    final label = inserted
+        ? p.basenameWithoutExtension(clip.path)
+        : 'Original  ${formatTimelineTime(clip.sourceStart)} – '
+            '${formatTimelineTime(clip.sourceEnd)}';
+    return Positioned(
+      left: xOf(clip.timelineStart),
+      top: 3,
+      bottom: 3,
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
+          onTap: () => widget.onSelectionChanged(
+              TimelineSelection(lane: lane.ref, clip: clip)),
+          child: Container(
+            key: ValueKey<Object>(clip),
+            width: width,
+            padding: const EdgeInsets.symmetric(horizontal: 6),
+            decoration: BoxDecoration(
+              color: (inserted ? const Color(0xFF7B4FB8) : lane.color)
+                  .withValues(alpha: selected ? 1.0 : 0.85),
+              borderRadius: BorderRadius.circular(_radius),
+              border: selected
+                  ? Border.all(color: Colors.white, width: 1.5)
+                  : null,
+            ),
+            alignment: Alignment.centerLeft,
+            child: width > 90
+                ? Text(
+                    label,
+                    style: theme.typography.caption?.copyWith(
+                        color: Colors.white, fontWeight: FontWeight.w600),
+                    overflow: TextOverflow.ellipsis,
+                    softWrap: false,
+                  )
+                : null,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildBarClip(FluentThemeData theme, _Lane lane,
+      double Function(double) xOf, double pps,
+      {required double start, required double end, required bool first}) {
     final isSubtitle = lane.type == TrackType.subtitle;
     final selected = widget.selection?.sameAs(lane.ref) ?? false;
-    final width = math.max(lane.duration * pps, 12.0);
+    final width = math.max((end - start) * pps, 12.0);
 
     Widget bar = Container(
-      key: ValueKey<Object>(lane.ref),
+      key: first ? ValueKey<Object>(lane.ref) : null,
       width: width,
       padding: const EdgeInsets.symmetric(horizontal: 6),
       decoration: BoxDecoration(
@@ -810,7 +919,7 @@ class TimelinePanelState extends State<TimelinePanel> {
             selected ? Border.all(color: Colors.white, width: 1.5) : null,
       ),
       alignment: Alignment.centerLeft,
-      child: width > 60 && lane.offset != 0
+      child: first && width > 60 && lane.offset != 0
           ? Text(
               formatOffset(lane.offset),
               style: theme.typography.caption?.copyWith(
@@ -856,7 +965,7 @@ class TimelinePanelState extends State<TimelinePanel> {
     }
 
     return Positioned(
-      left: xOf(lane.offset),
+      left: xOf(start),
       top: 3,
       bottom: 3,
       child: bar,
@@ -883,6 +992,8 @@ class _Lane {
     required this.label,
     required this.color,
     this.segments,
+    this.clips,
+    this.pieces,
     this.duration = 0,
     this.offset = 0,
     this.isExternal = false,
@@ -894,8 +1005,14 @@ class _Lane {
   final String label;
   final Color color;
 
-  /// Audio lanes edit these; video/subtitle lanes render a single bar.
+  /// Audio lanes edit these; other lanes render bars.
   final List<AudioSegment>? segments;
+
+  /// Vídeo principal: os trechos do programa.
+  final List<VideoClip>? clips;
+
+  /// Legendas: os pedaços que sobraram dos cortes.
+  final List<SubtitlePiece>? pieces;
   final double duration;
   final double offset;
   final bool isExternal;

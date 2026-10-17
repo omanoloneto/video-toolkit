@@ -17,6 +17,7 @@ class PropertiesPanel extends StatefulWidget {
     required this.onToggleRemoved,
     required this.onRemoveExternal,
     required this.onDeleteSegment,
+    required this.onDeleteVideoClip,
   });
 
   final MediaFileInfo file;
@@ -26,6 +27,7 @@ class PropertiesPanel extends StatefulWidget {
   final void Function(MediaTrack track) onToggleRemoved;
   final void Function(ExternalTrack track) onRemoveExternal;
   final void Function(Object lane, AudioSegment segment) onDeleteSegment;
+  final void Function(VideoClip clip) onDeleteVideoClip;
 
   @override
   State<PropertiesPanel> createState() => _PropertiesPanelState();
@@ -114,9 +116,11 @@ class _PropertiesPanelState extends State<PropertiesPanel> {
 
     return ListView(
       padding: const EdgeInsets.all(16),
-      children: sel.segment != null
-          ? _segmentProps(theme, sel.lane, sel.segment!)
-          : _laneProps(theme, sel.lane),
+      children: sel.clip != null
+          ? _clipProps(theme, sel.clip!)
+          : sel.segment != null
+              ? _segmentProps(theme, sel.lane, sel.segment!)
+              : _laneProps(theme, sel.lane),
     );
   }
 
@@ -172,6 +176,46 @@ class _PropertiesPanelState extends State<PropertiesPanel> {
         ExternalTrack(:final title) => title,
         _ => '?',
       };
+
+  // ------------------------------------------------------------------ clip
+
+  List<Widget> _clipProps(FluentThemeData theme, VideoClip clip) {
+    final inserted = clip.path != widget.file.path;
+    return [
+      _header(theme, ThemeIcons.of(context).video,
+          inserted ? 'Vídeo inserido' : 'Trecho do vídeo'),
+      _infoRow(theme, 'Origem',
+          inserted ? p.basename(clip.path) : 'Este arquivo'),
+      _infoRow(
+          theme,
+          'Trecho da origem',
+          '${formatTimelineTime(clip.sourceStart)} – '
+              '${formatTimelineTime(clip.sourceEnd)}'),
+      _infoRow(theme, 'Duração', formatTimelineTime(clip.duration)),
+      _infoRow(
+          theme,
+          'Na linha do tempo',
+          '${formatTimelineTime(clip.timelineStart)} – '
+              '${formatTimelineTime(clip.timelineEnd)}'),
+      _infoRow(theme, 'Imagem', '${clip.width}×${clip.height}'),
+      const SizedBox(height: 16),
+      Button(
+        onPressed: () => widget.onDeleteVideoClip(clip),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Icon(ThemeIcons.of(context).delete, size: 13),
+          const SizedBox(width: 6),
+          const Text('Remover trecho'),
+        ]),
+      ),
+      const SizedBox(height: 8),
+      Text(
+        'O áudio e as legendas desse pedaço saem junto, e o que vem '
+        'depois anda pra trás.',
+        style: TextStyle(
+            color: theme.resources.textFillColorSecondary, fontSize: 12),
+      ),
+    ];
+  }
 
   // ---------------------------------------------------------------- segment
 
