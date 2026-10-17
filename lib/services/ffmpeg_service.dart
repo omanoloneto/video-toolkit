@@ -589,6 +589,14 @@ class FfmpegService {
       }
     }
 
+    // copiar de uma entrada com -ss traz os pacotes desde o keyframe de antes,
+    // com tempo negativo, e o MKV atrasa o arquivo inteiro por eles
+    void dropBeforeSeek(List<String> inputFlags, String stream) {
+      if (inputFlags.contains('-ss')) {
+        codecArgs.addAll(['-copypriorss:$stream', '0']);
+      }
+    }
+
     // One output audio stream per lane. Untouched lanes are stream-copied;
     // split/trimmed/merged lanes go through a filter graph and are
     // re-encoded to AAC.
@@ -627,6 +635,7 @@ class FfmpegService {
       if (isPassthrough) {
         final inputIndex = inputFor(ownPath, flags: passthroughFlags);
         mapArgs.addAll(['-map', '$inputIndex:a:$ownTypeIndex']);
+        dropBeforeSeek(passthroughFlags, 'a:$outAudio');
         final shrink = compact && _isLossless(codec);
         if (shrink ||
             (isMp4Output && !_mp4AudioCodecs.contains(codec.toLowerCase()))) {
@@ -877,12 +886,12 @@ class FfmpegService {
               track, track.codec, track.title, track.language, name)) {
             break;
           }
-          var sourceInput = 0;
-          if (track.offsetSeconds != 0) {
-            sourceInput =
-                inputFor(source.path, flags: offsetFlags(track.offsetSeconds));
-          }
+          final flags = track.offsetSeconds != 0
+              ? offsetFlags(track.offsetSeconds)
+              : const <String>[];
+          final sourceInput = inputFor(source.path, flags: flags);
           mapArgs.addAll(['-map', '$sourceInput:${track.streamIndex}']);
+          dropBeforeSeek(flags, 's:$outSub');
           addSubtitleCodecOverride(track.codec);
           addTitle(track.title);
           outSub++;
@@ -900,11 +909,12 @@ class FfmpegService {
           track, track.codec, track.title, track.language, track.title)) {
         continue;
       }
-      final inputIndex = inputFor(track.path,
-          flags: track.offsetSeconds != 0
-              ? offsetFlags(track.offsetSeconds)
-              : const []);
+      final flags = track.offsetSeconds != 0
+          ? offsetFlags(track.offsetSeconds)
+          : const <String>[];
+      final inputIndex = inputFor(track.path, flags: flags);
       mapArgs.addAll(['-map', '$inputIndex:s:0']);
+      dropBeforeSeek(flags, 's:$outSub');
       addSubtitleCodecOverride(track.codec);
       addTitle(track.title);
       addLanguage(track.language);

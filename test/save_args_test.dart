@@ -147,6 +147,7 @@ void main() {
       expect(joined, contains('-itsoffset 2.500 -i $kSource'));
       expect(joined, contains('-map 1:a:0'));
       expect(joined, isNot(contains('-filter_complex')));
+      expect(joined, isNot(contains('-copypriorss')));
     });
 
     test('trim-only start keeps stream copy via -ss', () {
@@ -161,6 +162,53 @@ void main() {
       final joined = args.args.join(' ');
       expect(joined, contains('-ss 4.000 -i $kSource'));
       expect(joined, isNot(contains('-filter_complex')));
+    });
+
+    test('a copy from a -ss input drops what came before the cut', () {
+      final file = _file([_programVideo(), _audio(1, 0)]);
+      ProgramEdit(file, []).cut(0, 90);
+
+      final joined = service
+          .buildSaveArgs(source: file, added: [], outputPath: '/tmp/out.mkv')
+          .args
+          .join(' ');
+      expect(joined, contains('-ss 90.000 -i $kSource'));
+      expect(joined, contains('-map 1:a:0'));
+      expect(joined, contains('-copypriorss:a:0 0'));
+    });
+
+    test('a subtitle moved earlier drops the cues before the start', () {
+      final sub = MediaTrack(
+        streamIndex: 2,
+        type: TrackType.subtitle,
+        typeIndex: 0,
+        codec: 'SUBRIP',
+        details: '',
+        originalTitle: 'Legenda',
+        durationSeconds: 600,
+      )..offsetSeconds = -2;
+      final external = ExternalTrack(
+        path: '/tmp/sub.srt',
+        type: TrackType.subtitle,
+        codec: 'SUBRIP',
+        details: '',
+        title: 'Legenda PT',
+        durationSeconds: 0,
+      )..offsetSeconds = -1.5;
+
+      final joined = service
+          .buildSaveArgs(
+            source: _file([_video(), _audio(1, 0), sub]),
+            added: [external],
+            outputPath: '/tmp/out.mkv',
+          )
+          .args
+          .join(' ');
+      expect(joined, contains('-ss 2.000 -i $kSource'));
+      expect(joined, contains('-map 1:2'));
+      expect(joined, contains('-copypriorss:s:0 0'));
+      expect(joined, contains('-ss 1.500 -i /tmp/sub.srt'));
+      expect(joined, contains('-copypriorss:s:1 0'));
     });
 
     test('subtitle offset uses a flagged duplicate input', () {

@@ -322,6 +322,60 @@ Future<void> main() async {
       check('$name: audio plays under the black', under > -30,
           '${under.toStringAsFixed(1)}dB');
     }
+
+    // -------------------------------------------------- cut inside a long GOP
+    // copiar a partir de um -ss traz os pacotes desde o keyframe de antes: o
+    // som tirado voltava no começo e o arquivo inteiro atrasava
+    final longGop = '${dir.path}/gop-longo.mkv';
+    await _run(service.ffmpegPath!, [
+      '-y',
+      '-f', 'lavfi', '-i', 'testsrc=duration=6:size=320x240:rate=25',
+      '-f', 'lavfi',
+      '-i', "aevalsrc='if(gte(t,3.3),0.5*sin(2*PI*440*t),0)':s=48000:d=6",
+      '-i', subs,
+      '-map', '0', '-map', '1', '-map', '2',
+      '-c:v', 'libx264', '-g', '250', '-x264-params', 'scenecut=0',
+      '-c:a', 'aac', '-c:s', 'srt',
+      longGop,
+    ]);
+
+    final headCut = await service.probe(longGop);
+    ProgramEdit(headCut, []).cut(0, 3.3);
+    final headOut = '${dir.path}/corte-no-gop.mkv';
+    result =
+        await service.save(source: headCut, added: [], outputPath: headOut);
+    check('cut inside a long GOP save succeeds', result.success,
+        result.errorTail);
+    if (result.success) {
+      final duration = await _mediaDuration(service.ffprobePath!, headOut);
+      check('cut inside a long GOP lasts the 2.7s of the program',
+          (duration - 2.7).abs() < 0.1, duration.toStringAsFixed(3));
+      final start =
+          await _meanVolume(service.ffmpegPath!, headOut, 0.05, 0.5, 'anull');
+      check('cut inside a long GOP: the sound starts at the cut', start > -30,
+          '${start.toStringAsFixed(1)}dB');
+    }
+
+    final earlier = await service.probe(longGop);
+    earlier.byType(TrackType.subtitle).single.offsetSeconds = -2;
+    final earlierOut = '${dir.path}/legenda-adiantada.mkv';
+    result =
+        await service.save(source: earlier, added: [], outputPath: earlierOut);
+    check('subtitle moved earlier save succeeds', result.success,
+        result.errorTail);
+    if (result.success) {
+      final duration = await _mediaDuration(service.ffprobePath!, earlierOut);
+      check('subtitle moved earlier keeps the file at 6s',
+          (duration - 6).abs() < 0.1, duration.toStringAsFixed(3));
+      final cues = await Process.run(service.ffmpegPath!, [
+        '-v', 'error', '-i', earlierOut, '-map', '0:s:0', '-f', 'srt', '-',
+      ]);
+      final text = cues.stdout as String;
+      check('subtitle moved earlier drops the cues before the start',
+          text.contains('00:00:01,000 --> 00:00:02,000') &&
+              !text.contains('\num'),
+          text.replaceAll('\n', ' | '));
+    }
   } finally {
     await dir.delete(recursive: true);
   }
