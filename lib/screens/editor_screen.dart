@@ -61,7 +61,6 @@ class _EditorScreenState extends State<EditorScreen> {
   Timer? _previewTimer;
   int _previewRun = 0;
   Directory? _edlDir;
-  String? _lastEdl;
   bool _audioFailureShown = false;
 
   @override
@@ -216,12 +215,14 @@ class _EditorScreenState extends State<EditorScreen> {
   Future<void> _togglePlay() async {
     final player = _player;
     if (player == null) return;
-    if (!_isPlaying) {
-      // quem acabou de editar ouve a edição, não a versão de antes
-      if (_previewTimer?.isActive ?? false) await _applyPreview();
-      if (_playhead >= _contentEnd - 0.05) _onScrub(0);
+    if (_isPlaying) {
+      await player.pause();
+      return;
     }
-    await player.playOrPause();
+    // quem acabou de editar ouve a edição, não a versão de antes
+    if (_previewTimer?.isActive ?? false) await _applyPreview();
+    if (_playhead >= _contentEnd - 0.05) _onScrub(0);
+    await player.play();
   }
 
   void _stepSeconds(double delta) {
@@ -287,12 +288,10 @@ class _EditorScreenState extends State<EditorScreen> {
 
   Future<String> _writeEdl(String edl) async {
     final dir = _edlDir ??= await Directory.systemTemp.createTemp('vt-preview-edl-');
+    // cada montagem num arquivo novo: o player pode ainda estar abrindo a
+    // anterior (a pasta some quando o editor fecha)
     final file = File(p.join(dir.path, 'programa-$_previewRun.edl'));
     await file.writeAsString(edl);
-    // o player já leu a lista anterior quando abriu
-    final previous = _lastEdl;
-    _lastEdl = file.path;
-    if (previous != null) File(previous).delete().ignore();
     return file.path;
   }
 
