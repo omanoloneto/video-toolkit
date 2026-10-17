@@ -224,9 +224,15 @@ class _EditorScreenState extends State<EditorScreen> {
       await player.pause();
       return;
     }
+    // no fim volta ao começo antes de recarregar: o programa novo já abre ali
+    if (_playhead >= _contentEnd - 0.05) _onScrub(0);
     // quem acabou de editar ouve a edição, não a versão de antes
     if (_previewTimer?.isActive ?? false) await _applyPreview();
-    if (_playhead >= _contentEnd - 0.05) _onScrub(0);
+    final opening = _opening;
+    if (opening != null) await opening;
+    if (!identical(player, _player)) return;
+    // acabado, o play do media_kit volta ao instante em que a entrada abriu
+    if (player.state.completed) await player.seek(_durationOf(_playhead));
     await player.play();
   }
 
