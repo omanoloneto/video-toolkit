@@ -63,6 +63,31 @@ double? parseTimelineTime(String input) {
   return negative ? -seconds : seconds;
 }
 
+/// Colunas [from, to) visíveis de uma caixa de largura [width] que começa em
+/// [left] no conteúdo rolável, com a janela de [viewport] rolada até
+/// [scrollOffset] e [margin] de folga de cada lado; vazio fora da janela.
+({int from, int to}) visibleColumns({
+  required double left,
+  required double width,
+  required double scrollOffset,
+  required double viewport,
+  double margin = 0,
+}) {
+  final from = math.max(0, (scrollOffset - margin - left).floor());
+  final to = math.min(width, scrollOffset + viewport + margin - left).ceil();
+  return to > from ? (from: from, to: to) : (from: 0, to: 0);
+}
+
+// dois dedos no trackpad rolam a linha do tempo; o clique do trackpad chega
+// como mouse e continua arrastando o trecho
+const _pieceDragDevices = {
+  PointerDeviceKind.mouse,
+  PointerDeviceKind.touch,
+  PointerDeviceKind.stylus,
+  PointerDeviceKind.invertedStylus,
+  PointerDeviceKind.unknown,
+};
+
 class TimelinePanel extends StatefulWidget {
   const TimelinePanel({
     super.key,
@@ -118,16 +143,7 @@ class TimelinePanelState extends State<TimelinePanel> {
   static const _laneGap = 4.0;
   static const _snapPixels = 8.0;
   static const _edgeZone = 6.0;
-
-  // dois dedos no trackpad rolam a linha do tempo; o clique do trackpad
-  // chega como mouse e continua arrastando o trecho
-  static const _pieceDragDevices = {
-    PointerDeviceKind.mouse,
-    PointerDeviceKind.touch,
-    PointerDeviceKind.stylus,
-    PointerDeviceKind.invertedStylus,
-    PointerDeviceKind.unknown,
-  };
+  static const _minPieceWidth = 12.0;
 
   double? _pps; // pixels per second; null until fitted to the viewport
   final _scrollController = ScrollController();
@@ -139,10 +155,13 @@ class TimelinePanelState extends State<TimelinePanel> {
   // Geometry of the latest build, used to auto-scroll to the playhead.
   double _lastPps = 1;
   double _lastViewStart = 0;
+  double _lastViewEnd = 0;
 
   // Active segment drag bookkeeping (single pointer on desktop).
   double _dragStartValue = 0;
   double _dragAccumPx = 0;
+  double? _frozenViewEnd;
+  (double, double, double) _dragOrigin = (0, 0, 0);
 
   double get _playhead => widget.playhead;
 
@@ -173,6 +192,7 @@ class TimelinePanelState extends State<TimelinePanel> {
     super.didUpdateWidget(oldWidget);
     if (!identical(oldWidget.file, widget.file)) {
       _pps = null;
+      _frozenViewEnd = null;
     }
   }
 
@@ -283,7 +303,8 @@ class TimelinePanelState extends State<TimelinePanel> {
         end = math.max(end, lane.offset + lane.duration);
       }
     }
-    return (start: start, end: end + math.max(2, (end - start) * 0.02));
+    final padded = end + math.max(2, (end - start) * 0.02);
+    return (start: start, end: math.max(padded, _frozenViewEnd ?? padded));
   }
 
   // ------------------------------------------------------------- operations
@@ -441,6 +462,33 @@ class TimelinePanelState extends State<TimelinePanel> {
     widget.onModelChanged();
   }
 
+  /// Começo de um arrasto a partir de [startValue]: a escala e o fim da linha
+  /// do tempo ficam parados até [_endDrag], senão o que é arrastado foge do
+  /// ponteiro.
+  void _beginDrag(double pps, double startValue) {
+    _pps ??= pps;
+    _frozenViewEnd = _lastViewEnd;
+    _dragStartValue = startValue;
+    _dragAccumPx = 0;
+  }
+
+  void _beginPieceDrag(TimelinePiece piece, double pps, double startValue) {
+    _beginDrag(pps, startValue);
+    _dragOrigin = (piece.sourceStart, piece.sourceEnd, piece.timelineStart);
+  }
+
+  /// Volta [piece] ao que era no começo do arrasto: cada passo parte daí, e
+  /// passar por cima de outro trecho e voltar não deixa marca.
+  void _restoreDragOrigin(TimelinePiece piece) {
+    final (sourceStart, sourceEnd, timelineStart) = _dragOrigin;
+    piece
+      ..sourceStart = sourceStart
+      ..sourceEnd = sourceEnd
+      ..timelineStart = timelineStart;
+  }
+
+  void _endDrag() => setState(() => _frozenViewEnd = null);
+
   // ------------------------------------------------------------------ build
 
   @override
@@ -470,6 +518,7 @@ class TimelinePanelState extends State<TimelinePanel> {
               double xOf(double t) => (t - range.start) * pps;
               _lastPps = pps;
               _lastViewStart = range.start;
+              _lastViewEnd = range.end;
 
               final laneRows = Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -750,12 +799,13 @@ class TimelinePanelState extends State<TimelinePanel> {
 
     if (lane.clips != null) {
       final clips = lane.clips!;
-      for (final clip in clips) {
+      for (final clip in _paintOrder(clips, pps, widget.selection?.clip)) {
         children.add(_buildVideoClip(theme, lane, clip, clips, xOf, pps));
       }
     } else if (lane.segments != null) {
       final segments = lane.segments!;
-      for (final seg in segments) {
+      for (final seg
+          in _paintOrder(segments, pps, widget.selection?.segment)) {
         children.add(_buildSegmentClip(theme, lane, seg, segments, xOf, pps));
       }
     } else if (lane.pieces != null) {
@@ -781,6 +831,20 @@ class TimelinePanelState extends State<TimelinePanel> {
     );
   }
 
+  /// Ordem de desenho dos trechos de uma faixa: o selecionado por cima dos
+  /// outros e, por cima de tudo, os mais estreitos que a caixa mínima, que o
+  /// vizinho cobriria com alças e tudo.
+  List<T> _paintOrder<T extends TimelinePiece>(
+      List<T> pieces, double pps, Object? selected) {
+    int layer(T piece) =>
+        (piece.duration * pps < _minPieceWidth ? 2 : 0) +
+        (identical(piece, selected) ? 1 : 0);
+    return [
+      for (var level = 0; level < 4; level++)
+        ...pieces.where((piece) => layer(piece) == level),
+    ];
+  }
+
   Widget _buildSegmentClip(
     FluentThemeData theme,
     _Lane lane,
@@ -790,7 +854,7 @@ class TimelinePanelState extends State<TimelinePanel> {
     double pps,
   ) {
     final selected = widget.selection?.sameAs(lane.ref, seg) ?? false;
-    final width = math.max(seg.duration * pps, 12.0);
+    final width = math.max(seg.duration * pps, _minPieceWidth);
     final label =
         '${_sourceName(seg.source)}  ${formatTimelineTime(seg.timelineStart)}'
         ' – ${formatTimelineTime(seg.timelineEnd)}';
@@ -801,19 +865,16 @@ class TimelinePanelState extends State<TimelinePanel> {
     final body = MouseRegion(
       cursor: SystemMouseCursors.click,
       child: GestureDetector(
+        supportedDevices: _pieceDragDevices,
         onTap: select,
         onDoubleTap: () => _editSegment(lane.ref, seg),
         onHorizontalDragStart: (_) {
           select();
-          // Freeze the fit-derived scale: the drag itself can change the
-          // timeline span, and a scale that shifts mid-drag feeds back
-          // into the position math.
-          _pps ??= pps;
-          _dragStartValue = seg.timelineStart;
-          _dragAccumPx = 0;
+          _beginPieceDrag(seg, pps, seg.timelineStart);
         },
         onHorizontalDragUpdate: (details) {
           _dragAccumPx += details.delta.dx;
+          _restoreDragOrigin(seg);
           var next = math.max(0.0, _dragStartValue + _dragAccumPx / pps);
           next = _snap(next, seg, segments, pps);
           seg.timelineStart = next;
@@ -821,6 +882,7 @@ class TimelinePanelState extends State<TimelinePanel> {
         },
         onHorizontalDragEnd: (_) {
           seg.timelineStart = (seg.timelineStart * 100).round() / 100;
+          _endDrag();
           widget.onModelChanged();
         },
         child: Container(
@@ -835,13 +897,17 @@ class TimelinePanelState extends State<TimelinePanel> {
             fit: StackFit.expand,
             children: [
               if (waveform != null)
-                CustomPaint(
-                  painter: _WaveformPainter(
-                    waveform: waveform,
-                    sourceStart: seg.sourceStart,
-                    sourceEnd: seg.sourceEnd,
-                    pps: pps,
-                    color: Colors.white.withValues(alpha: 0.55),
+                RepaintBoundary(
+                  child: CustomPaint(
+                    painter: _WaveformPainter(
+                      waveform: waveform,
+                      sourceStart: seg.sourceStart,
+                      sourceEnd: seg.sourceEnd,
+                      pps: pps,
+                      left: xOf(seg.timelineStart),
+                      scroll: _scrollController,
+                      color: Colors.white.withValues(alpha: 0.55),
+                    ),
                   ),
                 ),
               if (width > 90)
@@ -908,12 +974,12 @@ class TimelinePanelState extends State<TimelinePanel> {
             onTap: select,
             onStart: () {
               select();
-              _pps ??= pps;
-              _dragAccumPx = 0;
-              _dragStartValue = left ? piece.timelineStart : piece.timelineEnd;
+              _beginPieceDrag(
+                  piece, pps, left ? piece.timelineStart : piece.timelineEnd);
             },
             onUpdate: (dx) {
               _dragAccumPx += dx;
+              _restoreDragOrigin(piece);
               final wanted = _snapEdge(
                   _dragStartValue + _dragAccumPx / pps, pps, piece, lane);
               if (left) {
@@ -923,7 +989,10 @@ class TimelinePanelState extends State<TimelinePanel> {
               }
               widget.onModelChanged();
             },
-            onEnd: () => widget.onModelChanged(),
+            onEnd: () {
+              _endDrag();
+              widget.onModelChanged();
+            },
           ),
         );
     return SizedBox(
@@ -1002,7 +1071,7 @@ class TimelinePanelState extends State<TimelinePanel> {
       List<VideoClip> clips, double Function(double) xOf, double pps) {
     final selected = identical(widget.selection?.clip, clip);
     final inserted = clip.path != widget.file.path;
-    final width = math.max(clip.duration * pps, 12.0);
+    final width = math.max(clip.duration * pps, _minPieceWidth);
     final label = inserted
         ? p.basenameWithoutExtension(clip.path)
         : 'Original  ${formatTimelineTime(clip.sourceStart)} – '
@@ -1019,18 +1088,18 @@ class TimelinePanelState extends State<TimelinePanel> {
         onTap: select,
         onHorizontalDragStart: (_) {
           select();
-          _pps ??= pps;
-          _dragStartValue = clip.timelineStart;
-          _dragAccumPx = 0;
+          _beginPieceDrag(clip, pps, clip.timelineStart);
         },
         onHorizontalDragUpdate: (details) {
           _dragAccumPx += details.delta.dx;
+          _restoreDragOrigin(clip);
           final wanted = _snapEdge(
               _dragStartValue + _dragAccumPx / pps, pps, clip, clips,
               length: clip.duration);
           clip.timelineStart = clampMove(clips, clip, wanted);
           widget.onModelChanged();
         },
+        onHorizontalDragEnd: (_) => _endDrag(),
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 6),
           decoration: BoxDecoration(
@@ -1076,7 +1145,7 @@ class TimelinePanelState extends State<TimelinePanel> {
       {required double start, required double end, required bool first}) {
     final isSubtitle = lane.type == TrackType.subtitle;
     final selected = widget.selection?.sameAs(lane.ref) ?? false;
-    final width = math.max((end - start) * pps, 12.0);
+    final width = math.max((end - start) * pps, _minPieceWidth);
 
     Widget bar = Container(
       key: first ? ValueKey<Object>(lane.ref) : null,
@@ -1103,15 +1172,14 @@ class TimelinePanelState extends State<TimelinePanel> {
       bar = MouseRegion(
         cursor: SystemMouseCursors.resizeLeftRight,
         child: GestureDetector(
+          supportedDevices: _pieceDragDevices,
           onTap: () =>
               widget.onSelectionChanged(TimelineSelection(lane: lane.ref)),
           onDoubleTap: () => widget.onEditSubtitleOffset(lane.ref),
           onHorizontalDragStart: (_) {
             widget
                 .onSelectionChanged(TimelineSelection(lane: lane.ref));
-            _pps ??= pps;
-            _dragStartValue = lane.offset;
-            _dragAccumPx = 0;
+            _beginDrag(pps, lane.offset);
           },
           onHorizontalDragUpdate: (details) {
             _dragAccumPx += details.delta.dx;
@@ -1120,6 +1188,7 @@ class TimelinePanelState extends State<TimelinePanel> {
             _setSubtitleOffset(lane.ref, next);
           },
           onHorizontalDragEnd: (_) {
+            _endDrag();
             _setSubtitleOffset(
                 lane.ref, (_currentSubtitleOffset(lane.ref) * 100).round() / 100);
           },
@@ -1202,6 +1271,7 @@ class _EdgeHandleState extends State<_EdgeHandle> {
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
         dragStartBehavior: DragStartBehavior.down,
+        supportedDevices: _pieceDragDevices,
         onTap: widget.onTap,
         onHorizontalDragStart: (_) {
           setState(() => _dragging = true);
@@ -1228,29 +1298,41 @@ class _EdgeHandleState extends State<_EdgeHandle> {
 }
 
 /// Forma de onda do pedaço [sourceStart, sourceEnd) da origem: uma barra por
-/// coluna de pixels, só na parte visível.
+/// coluna de pixels, só na parte que [scroll] mostra do trecho que começa em
+/// [left] no conteúdo.
 class _WaveformPainter extends CustomPainter {
   _WaveformPainter({
     required this.waveform,
     required this.sourceStart,
     required this.sourceEnd,
     required this.pps,
+    required this.left,
+    required this.scroll,
     required this.color,
-  });
+  }) : super(repaint: scroll);
+
+  static const _margin = 8.0;
 
   final Waveform waveform;
   final double sourceStart;
   final double sourceEnd;
   final double pps;
+  final double left;
+  final ScrollController scroll;
   final Color color;
 
   @override
   void paint(Canvas canvas, Size size) {
-    final visible = canvas.getLocalClipBounds();
-    final from = math.max(0, visible.left.floor());
-    final to = math.min(size.width, visible.right).ceil();
     final loudest = waveform.maxPeak;
-    if (to <= from || loudest <= 0) return;
+    if (!scroll.hasClients || loudest <= 0) return;
+    final (:from, :to) = visibleColumns(
+      left: left,
+      width: size.width,
+      scrollOffset: scroll.offset,
+      viewport: scroll.position.viewportDimension,
+      margin: _margin,
+    );
+    if (to <= from) return;
     final mid = size.height / 2;
     final half = mid - 2;
     final points = Float32List((to - from) * 4);
@@ -1283,6 +1365,8 @@ class _WaveformPainter extends CustomPainter {
       old.sourceStart != sourceStart ||
       old.sourceEnd != sourceEnd ||
       old.pps != pps ||
+      old.left != left ||
+      !identical(old.scroll, scroll) ||
       old.color != color;
 }
 
