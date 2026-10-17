@@ -15,8 +15,13 @@ const kWaveformBucketsPerSecond = 200.0;
 /// Duração do silêncio que tapa os vãos da prévia.
 const kSilenceSeconds = 600.0;
 
-/// Duração do vídeo preto que tapa os vãos da imagem na prévia.
-const kBlackSeconds = 600.0;
+/// Duração do vídeo preto que tapa os vãos da imagem na prévia: vão mais
+/// longo usa vários pedaços dele.
+const kBlackSeconds = 10.0;
+
+// o player busca pelo quadro: com quadro raro, cair no meio de um vão pula o
+// som até o quadro seguinte
+const _blackFrameRate = 25;
 
 const _waveformSampleRate = 8000;
 const _folderPrefix = 'vt-preview-';
@@ -173,7 +178,7 @@ class AudioCache {
     return _silence;
   }
 
-  /// Vídeo preto H.264 de [kBlackSeconds] a 1 quadro por segundo, com o
+  /// Vídeo preto H.264 de [kBlackSeconds] a 25 quadros por segundo, com o
   /// tamanho de quadro (arredondado pra cima até par) e a proporção de pixel
   /// dados: trocar pra ele não muda o tamanho da imagem no player. Null até
   /// ficar pronto (a primeira chamada pra esse quadro começa; se falhar, não
@@ -299,7 +304,7 @@ class AudioCache {
   Future<void> _makeBlack(_Frame frame) async {
     final path = await _generate('black-${_nextName++}.mkv', [
       '-f', 'lavfi',
-      '-i', 'color=c=black:s=${frame.width}x${frame.height}:r=1',
+      '-i', 'color=c=black:s=${frame.width}x${frame.height}:r=$_blackFrameRate',
       '-t', '$kBlackSeconds',
       '-vf', 'setsar=${frame.sarNum}/${frame.sarDen}',
       '-c:v', 'libx264',

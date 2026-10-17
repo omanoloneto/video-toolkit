@@ -248,12 +248,22 @@ class _EditorScreenState extends State<EditorScreen> {
     final file = _file;
     final audio = _audio;
     if (player == null || file == null || audio == null) return;
+    final frame = programFrame(file);
     final plan = buildPreviewPlan(
       file: file,
       added: _added,
       monitor: _monitorLane,
       audioFile: audio.extracted,
       silenceFile: audio.silence(),
+      blackFile: frame == null
+          ? null
+          : audio.blackVideo(
+              width: frame.width,
+              height: frame.height,
+              sarNum: frame.sarNum,
+              sarDen: frame.sarDen,
+            ),
+      blackLength: kBlackSeconds,
     );
     // uma montagem mais nova cancela a que ainda está gravando a lista
     final run = ++_previewRun;

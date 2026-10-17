@@ -28,6 +28,16 @@ List<Object> audioOutputOf(
   return merging.contains(lane) ? merging : [lane];
 }
 
+/// O trecho cujo quadro o vídeo preto dos vãos copia, como no arquivo salvo:
+/// um do vídeo original enquanto sobra algum, senão o primeiro do programa.
+/// Null sem imagem.
+VideoClip? programFrame(MediaFileInfo file) {
+  final clips = [...?file.mainVideo?.clips]
+    ..sort((a, b) => a.timelineStart.compareTo(b.timelineStart));
+  return clips.where((c) => c.path == file.path).firstOrNull ??
+      clips.firstOrNull;
+}
+
 /// O que a prévia toca.
 sealed class PreviewPlan {
   const PreviewPlan();
@@ -99,7 +109,7 @@ PreviewPlan buildPreviewPlan({
   required String? silenceFile,
   required String? blackFile,
   double silenceLength = 600,
-  double blackLength = 600,
+  double blackLength = 10,
 }) {
   _checkFillerLength(silenceLength, 'silenceLength');
   _checkFillerLength(blackLength, 'blackLength');

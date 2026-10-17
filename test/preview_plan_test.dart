@@ -380,6 +380,62 @@ void main() {
             reason: 'blackLength $length');
       }
     });
+
+    VideoClip opening() => VideoClip(
+          path: kOpening,
+          streamTypeIndex: 0,
+          width: 1280,
+          height: 720,
+          rate: '30',
+          sarNum: 4,
+          sarDen: 3,
+          sourceStart: 0,
+          sourceEnd: 3,
+          timelineStart: 0,
+        );
+
+    test('the black copies the frame of the original, even after an insert',
+        () {
+      final file = _file([_video()]);
+      ProgramEdit(file, []).insert(opening(), at: 0);
+
+      expect(programFrame(file)?.path, kSource);
+    });
+
+    test('without the original the black copies the first clip', () {
+      // sem um quadro o preto nunca fica pronto e a prévia para de atualizar
+      final file = _file([_video()]);
+      ProgramEdit(file, [])
+        ..insert(opening(), at: 0)
+        ..cut(3, 23);
+      file.mainVideo!.clips.single.timelineStart = 2;
+
+      final frame = programFrame(file)!;
+      expect(
+        (frame.path, frame.width, frame.height, frame.sarNum, frame.sarDen),
+        (kOpening, 1280, 720, 4, 3),
+      );
+      _expectEdl(
+        _plan(file),
+        [
+          '# mpv EDL v0',
+          '!no_chapters',
+          '%12%/c/black.mkv,0.000000,2.000000',
+          '%14%/v/opening.mp4,0.000000,3.000000',
+        ],
+        hasAudio: false,
+      );
+
+      // como no arquivo salvo: o primeiro na linha do tempo, não na lista
+      final first = opening()..timelineStart = 1;
+      expect(
+          programFrame(_file([videoOf([_clip(kOpening, 0, 3, 6), first])])),
+          same(first));
+    });
+
+    test('a file without image has no frame', () {
+      expect(programFrame(_file([_audio(0)])), isNull);
+    });
   });
 
   group('audio', () {

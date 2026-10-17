@@ -289,7 +289,9 @@ void main() {
       for (final (path, sar) in [(wide()!, '4:3'), (square()!, '1:1')]) {
         final black = await _probe(ffmpeg.ffprobePath!, path);
         final duration = (black['format'] as Map)['duration'] as String;
-        expect(double.parse(duration), closeTo(kBlackSeconds, 1));
+        // a prévia usa pedaços de kBlackSeconds: o arquivo cobre cada um
+        expect(double.parse(duration),
+            inInclusiveRange(kBlackSeconds, kBlackSeconds + 0.04));
         expect(
           (black['streams'] as List).single,
           allOf(
@@ -298,7 +300,8 @@ void main() {
             containsPair('height', 48),
             containsPair('sample_aspect_ratio', sar),
             containsPair('pix_fmt', 'yuv420p'),
-            containsPair('avg_frame_rate', '1/1'),
+            // a 1 quadro por segundo, buscar no meio do vão pulava o som
+            containsPair('avg_frame_rate', '25/1'),
           ),
           reason: path,
         );
