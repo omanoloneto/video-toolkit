@@ -265,6 +265,46 @@ void main() {
       expect(cache.extracted(toneFirst), isNull);
     }, timeout: const Timeout(Duration(minutes: 1)));
 
+    test('a stream that cannot be copied does not hold back the others',
+        () async {
+      final ffmpeg = FfmpegService();
+      if (!await ffmpeg.locate()) {
+        markTestSkipped('needs ffmpeg and ffprobe installed');
+        return;
+      }
+      final dir = await Directory.systemTemp.createTemp('vt-audio-cache-');
+      addTearDown(() => dir.delete(recursive: true));
+      // o ADPCM do QuickTime não entra em Matroska: a execução das duas falha
+      final clip = p.join(dir.path, 'clip.mov');
+      final made = await Process.run(ffmpeg.ffmpegPath!, [
+        '-hide_banner', '-loglevel', 'error', '-y',
+        '-f', 'lavfi', '-i', 'sine=f=440:d=2:r=48000',
+        '-f', 'lavfi', '-i', 'sine=f=660:d=2:r=48000',
+        '-map', '0', '-map', '1',
+        '-c:a:0', 'aac', '-c:a:1', 'adpcm_ima_qt',
+        clip,
+      ]);
+      expect(made.exitCode, 0, reason: '${made.stderr}');
+
+      final cache = AudioCache(ffmpeg);
+      addTearDown(cache.dispose);
+      final good = AudioSource(path: clip, audioTypeIndex: 0);
+      final bad = AudioSource(path: clip, audioTypeIndex: 1);
+      cache.prefetch([good, bad]);
+      await _until(
+        cache,
+        () =>
+            cache.failed(bad) &&
+            (cache.failed(good) || cache.extracted(good) != null),
+      );
+
+      expect(cache.failed(good), isFalse);
+      final copy = cache.extracted(good)!;
+      // o que as execuções que falharam gravaram não fica ocupando o disco
+      expect(Directory(p.dirname(copy)).listSync().map((e) => e.path), [copy]);
+      expect(cache.extracted(bad), isNull);
+    }, timeout: const Timeout(Duration(minutes: 1)));
+
     test('makes one black video per frame, with its size and pixel shape',
         () async {
       final ffmpeg = FfmpegService();

@@ -63,7 +63,7 @@ class _EditorScreenState extends State<EditorScreen> {
   Timer? _previewTimer;
   int _previewRun = 0;
   Directory? _edlDir;
-  bool _audioFailureShown = false;
+  final _warnedFiles = <String>{};
 
   @override
   void initState() {
@@ -128,7 +128,7 @@ class _EditorScreenState extends State<EditorScreen> {
         _selection = null;
         _playhead = 0;
         _monitorLane = null;
-        _audioFailureShown = false;
+        _warnedFiles.clear();
       });
       await _initPlayer();
     } catch (e) {
@@ -249,11 +249,17 @@ class _EditorScreenState extends State<EditorScreen> {
     final audio = _audio;
     if (player == null || file == null || audio == null) return;
     final frame = programFrame(file);
+    final silenced = <AudioSource>{};
     final plan = buildPreviewPlan(
       file: file,
       added: _added,
       monitor: _monitorLane,
       audioFile: audio.extracted,
+      unavailable: (source) {
+        final failed = audio.failed(source);
+        if (failed) silenced.add(source);
+        return failed;
+      },
       silenceFile: audio.silence(),
       blackFile: frame == null
           ? null
@@ -265,12 +271,9 @@ class _EditorScreenState extends State<EditorScreen> {
             ),
       blackLength: kBlackSeconds,
     );
+    _warnSilenced(silenced);
     // uma montagem mais nova cancela a que ainda está gravando a lista
     final run = ++_previewRun;
-    if (plan is PendingPreview) {
-      if (plan.missing.any(audio.failed)) _warnAudioFailure();
-      return;
-    }
     if (plan == _shownPlan) return;
     final String media;
     final String audioId;
@@ -307,12 +310,16 @@ class _EditorScreenState extends State<EditorScreen> {
     return file.path;
   }
 
-  void _warnAudioFailure() {
-    if (_audioFailureShown) return;
-    _audioFailureShown = true;
-    _showError('Prévia sem a edição do áudio',
-        'Não deu pra preparar uma das faixas de áudio para a prévia. O vídeo '
-            'salvo não é afetado.');
+  void _warnSilenced(Set<AudioSource> sources) {
+    final files =
+        {for (final source in sources) source.path}.difference(_warnedFiles);
+    if (files.isEmpty) return;
+    _warnedFiles.addAll(files);
+    _showError(
+        'Prévia sem parte do áudio',
+        'Não deu pra preparar o áudio de ${files.map(p.basename).join(', ')} '
+            'para a prévia: esses trechos tocam em silêncio. O vídeo salvo '
+            'não é afetado.');
   }
 
   void _forgetMonitor(Object lane) {

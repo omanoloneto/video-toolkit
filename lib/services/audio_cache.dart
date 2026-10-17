@@ -144,7 +144,8 @@ class AudioCache {
 
   /// Começa o trabalho das faixas ainda não vistas. Faixas de um mesmo
   /// arquivo pedidas no mesmo frame saem numa execução só (um vídeo grande é
-  /// lido uma vez); a forma de onda vem da cópia, assim que ela fica pronta.
+  /// lido uma vez) e, se ela falha, cada uma tenta sozinha; a forma de onda
+  /// vem da cópia, assim que ela fica pronta.
   void prefetch(Iterable<AudioSource> sources) {
     if (_disposed) return;
     final idle = _queued.isEmpty;
@@ -261,10 +262,22 @@ class AudioCache {
     if (copied) {
       _copies.addAll(copies);
       copies.forEach((source, copy) => unawaited(_measure(source, copy)));
+      revision.value++;
+      return;
+    }
+    await Future.wait(
+        [for (final copy in copies.values) _deleteQuietly(File(copy))]);
+    if (_disposed) return;
+    if (copies.length > 1) {
+      // uma faixa que não copia derruba a execução inteira: cada uma tenta
+      // sozinha
+      for (final source in streams) {
+        await _copy([source]);
+      }
     } else {
       _failed.addAll(streams);
+      revision.value++;
     }
-    revision.value++;
   }
 
   Future<void> _measure(AudioSource source, String copy) async {
@@ -389,9 +402,9 @@ class AudioCache {
     }
   }
 
-  static Future<void> _deleteQuietly(Directory folder) async {
+  static Future<void> _deleteQuietly(FileSystemEntity entity) async {
     try {
-      await folder.delete(recursive: true);
+      await entity.delete(recursive: entity is Directory);
     } on FileSystemException {
       // a próxima sessão tenta de novo
     }

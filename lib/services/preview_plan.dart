@@ -100,7 +100,8 @@ final class PendingPreview extends PreviewPlan {
 /// [audioFile] dá a cópia de cada origem com só aquele áudio, [silenceFile]
 /// um silêncio de [silenceLength] segundos e [blackFile] um vídeo preto de
 /// [blackLength] segundos, que tapa os vãos da imagem; null enquanto ainda
-/// não existem.
+/// não existem. A origem sem cópia que [unavailable] dá como perdida toca
+/// silêncio em vez de segurar a prévia.
 PreviewPlan buildPreviewPlan({
   required MediaFileInfo file,
   required List<ExternalTrack> added,
@@ -108,6 +109,7 @@ PreviewPlan buildPreviewPlan({
   required String? Function(AudioSource source) audioFile,
   required String? silenceFile,
   required String? blackFile,
+  bool Function(AudioSource source) unavailable = _never,
   double silenceLength = 600,
   double blackLength = 10,
 }) {
@@ -131,14 +133,12 @@ PreviewPlan buildPreviewPlan({
   var silenceMissing = false;
   final audio = <_Entry>[];
   for (final (:segment, :from, :to) in spans) {
-    if (segment != null) {
-      final copy = audioFile(segment.source);
-      if (copy == null) {
-        missing.add(segment.source);
-      } else {
-        _append(audio, copy,
-            segment.sourceStart + (from - segment.timelineStart), to - from);
-      }
+    final copy = segment == null ? null : audioFile(segment.source);
+    if (segment != null && copy != null) {
+      _append(audio, copy,
+          segment.sourceStart + (from - segment.timelineStart), to - from);
+    } else if (segment != null && !unavailable(segment.source)) {
+      missing.add(segment.source);
     } else if (silenceFile == null) {
       silenceMissing = true;
     } else {
@@ -166,6 +166,8 @@ PreviewPlan buildPreviewPlan({
   ];
   return EdlPreview('${lines.join('\n')}\n', hasAudio: hasAudio);
 }
+
+bool _never(AudioSource source) => false;
 
 void _checkFillerLength(double length, String name) {
   if (length.isNaN || length < _minLength) {

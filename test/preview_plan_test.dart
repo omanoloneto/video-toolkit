@@ -80,6 +80,7 @@ PreviewPlan _plan(
   List<ExternalTrack> added = const [],
   Object? monitor,
   String? Function(AudioSource source) audioFile = _copy,
+  bool Function(AudioSource source) unavailable = _stillComing,
   String? silenceFile = kSilence,
   String? blackFile = kBlack,
   double silenceLength = 600,
@@ -90,11 +91,14 @@ PreviewPlan _plan(
       added: added,
       monitor: monitor,
       audioFile: audioFile,
+      unavailable: unavailable,
       silenceFile: silenceFile,
       blackFile: blackFile,
       silenceLength: silenceLength,
       blackLength: blackLength,
     );
+
+bool _stillComing(AudioSource source) => false;
 
 void _expectEdl(PreviewPlan plan, List<String> lines, {bool hasAudio = true}) {
   expect(plan, isA<EdlPreview>());
@@ -679,6 +683,69 @@ void main() {
       expect(PendingPreview({a, b}), PendingPreview({b, a}));
       expect(PendingPreview({a, b}).hashCode, PendingPreview({b, a}).hashCode);
       expect(PendingPreview({a}), isNot(PendingPreview({a, b})));
+    });
+  });
+
+  group('lost copies', () {
+    test('a source whose copy failed plays silence and edits still show', () {
+      final file = _file([_video(), _audio(0)]);
+      ProgramEdit(file, []).cut(5, 10);
+      // esperando a cópia que não vem, o corte nunca chegava ao player
+      expect(
+        _plan(file, audioFile: (_) => null),
+        PendingPreview({const AudioSource(path: kSource, audioTypeIndex: 0)}),
+      );
+
+      _expectEdl(
+          _plan(file, audioFile: (_) => null, unavailable: (_) => true), [
+        '# mpv EDL v0',
+        '!no_chapters',
+        '%14%/v/episode.mkv,0.000000,5.000000,layout=this',
+        '%14%/v/episode.mkv,10.000000,10.000000',
+        ..._audioGroup,
+        '%15%/c/silence.flac,0.000000,5.000000',
+        '%15%/c/silence.flac,0.000000,10.000000',
+      ]);
+    });
+
+    test('only the lost source plays silence; the others are still waited for',
+        () {
+      final lane = _audio(0);
+      lane.segments
+        ..clear()
+        ..addAll([
+          _segment(kSource, 0, 0, 10, 0),
+          _segment(kDub, 0, 0, 10, 10),
+        ]);
+      final file = _file([_video(), lane]);
+      bool lost(AudioSource source) => source.path == kDub;
+
+      expect(
+        _plan(file, audioFile: (_) => null, unavailable: lost),
+        PendingPreview({const AudioSource(path: kSource, audioTypeIndex: 0)}),
+      );
+      _expectEdl(
+          _plan(file,
+              audioFile: (s) => lost(s) ? null : _copy(s), unavailable: lost),
+          [
+            ..._wholeVideo,
+            ..._audioGroup,
+            '%8%/c/0.mka,0.000000,10.000000',
+            '%15%/c/silence.flac,0.000000,10.000000',
+          ]);
+    });
+
+    test('a lost source still waits for the silent file', () {
+      final file = _file([_video(), _audio(0)]);
+      ProgramEdit(file, []).cut(5, 10);
+
+      expect(
+        _plan(file,
+            audioFile: (_) => null,
+            unavailable: (_) => true,
+            silenceFile: null),
+        const PendingPreview({}),
+      );
     });
   });
 }
