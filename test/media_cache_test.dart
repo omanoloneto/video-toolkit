@@ -7,7 +7,7 @@ import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:video_toolkit/models/tracks.dart';
-import 'package:video_toolkit/services/audio_cache.dart';
+import 'package:video_toolkit/services/media_cache.dart';
 import 'package:video_toolkit/services/ffmpeg_service.dart';
 
 Uint8List _pcm(List<int> samples) {
@@ -21,7 +21,7 @@ Uint8List _pcm(List<int> samples) {
 Float32List _peaksOf(List<int> samples, {int sampleRate = 8000}) =>
     (PeakBuilder(sampleRate: sampleRate)..add(_pcm(samples))).finish();
 
-Future<void> _until(AudioCache cache, bool Function() ready) async {
+Future<void> _until(MediaCache cache, bool Function() ready) async {
   final done = Completer<void>();
   void check() {
     if (!done.isCompleted && ready()) done.complete();
@@ -137,9 +137,9 @@ void main() {
     });
   });
 
-  group('AudioCache', () {
+  group('MediaCache', () {
     test('without ffmpeg everything fails instead of waiting', () async {
-      final cache = AudioCache(FfmpegService());
+      final cache = MediaCache(FfmpegService());
       const sources = [
         AudioSource(path: '/videos/movie.mkv', audioTypeIndex: 0),
         AudioSource(path: '/videos/movie.mkv', audioTypeIndex: 1),
@@ -198,7 +198,7 @@ void main() {
       ]);
       expect(made.exitCode, 0, reason: '${made.stderr}');
 
-      final cache = AudioCache(ffmpeg);
+      final cache = MediaCache(ffmpeg);
       addTearDown(cache.dispose);
       final toneFirst = AudioSource(path: movie, audioTypeIndex: 0);
       final toneLast = AudioSource(path: movie, audioTypeIndex: 1);
@@ -288,7 +288,7 @@ void main() {
       ]);
       expect(made.exitCode, 0, reason: '${made.stderr}');
 
-      final cache = AudioCache(ffmpeg);
+      final cache = MediaCache(ffmpeg);
       addTearDown(cache.dispose);
       final good = AudioSource(path: clip, audioTypeIndex: 0);
       final bad = AudioSource(path: clip, audioTypeIndex: 1);
@@ -326,7 +326,7 @@ void main() {
       expect(made.exitCode, 0, reason: '${made.stderr}');
 
       const edl = '# mpv EDL v0\n%9%/c/0.mka,0.000000,1.000000\n';
-      final cache = AudioCache(ffmpeg);
+      final cache = MediaCache(ffmpeg);
       addTearDown(cache.dispose);
       final source = AudioSource(path: tone, audioTypeIndex: 0);
       String? black() =>
@@ -349,7 +349,7 @@ void main() {
       final touched =
           await Process.run('touch', ['-t', '202001010000', folder.path]);
       expect(touched.exitCode, 0, reason: '${touched.stderr}');
-      final other = AudioCache(ffmpeg);
+      final other = MediaCache(ffmpeg);
       addTearDown(other.dispose);
       await other.writeEdl(edl);
       final limit = DateTime.now().add(const Duration(seconds: 10));
@@ -382,7 +382,7 @@ void main() {
         markTestSkipped('needs ffmpeg and ffprobe installed');
         return;
       }
-      final cache = AudioCache(ffmpeg);
+      final cache = MediaCache(ffmpeg);
       addTearDown(cache.dispose);
       String? wide() =>
           cache.blackVideo(width: 63, height: 47, sarNum: 4, sarDen: 3);

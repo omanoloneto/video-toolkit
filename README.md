@@ -48,9 +48,10 @@ copied bit-for-bit.
   piece: its audio and subtitles go with it and everything after moves back,
   so nothing falls out of sync. Insert another video file at the playhead
   (opening, ending...): it is fitted into the original frame, its sound fills
-  the gap in every audio track and the rest moves forward. Dragging the edge
-  of a video piece trims or brings back footage the same way, with the
-  audio and subtitles of that stretch. Cuts are frame-exact, so an edited
+  the gap in every audio track and the rest moves forward. Video and audio
+  are independent lanes for fine work: dragging the edge of a video piece
+  trims or brings back footage of that piece only, and pieces can be dragged
+  apart; gaps play and save as black. Cuts are frame-exact, so an edited
   video is always re-encoded on save.
 - **Compact formats** — on save, keep the original picture or re-encode to
   **AV1** (SVT-AV1, about half the size at the same quality — VMAF ≈ 96.5 on
@@ -139,7 +140,8 @@ single command per save:
    encoded to AAC.
 4. An edited video becomes one input per piece (`-ss` to its start), cut
    exactly with `trim`, scaled and padded into the original frame when it
-   comes from another file, and joined with `concat`; chapters are dropped
+   comes from another file, and joined with `concat` (gaps between pieces
+   become black frames); chapters are dropped
    because they would point to the wrong places. Subtitles cut by the edit
    (and text subtitles moved earlier, so the cue on screen at the new start
    is kept) are extracted, their cues moved piece by piece, and muxed back.
@@ -196,9 +198,9 @@ flutter test integration_test -d macos  # runs the real app: trims audio and
 ```
 lib/
   models/tracks.dart          # tracks, audio segments, split/merge rules
-  models/program.dart         # ripple cuts/inserts, edge trims, snapshots
+  models/program.dart         # ripple cuts/inserts, edge trims and moves
   services/ffmpeg_service.dart# probing + ffmpeg command construction
-  services/audio_cache.dart   # per-track audio copies, waveforms, silence
+  services/media_cache.dart   # per-track audio copies, waveforms, gap fillers
   services/preview_plan.dart  # what the preview plays (mpv EDL)
   screens/editor_screen.dart  # app shell, menu bar, playback state
   widgets/timeline_panel.dart # timeline: lanes, clips, ruler, playhead

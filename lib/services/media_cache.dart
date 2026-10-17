@@ -115,13 +115,13 @@ class PeakBuilder {
   }
 }
 
-/// Áudio derivado dos arquivos em edição: cada faixa copiada sozinha (o
+/// Mídia derivada dos arquivos em edição: cada faixa copiada sozinha (o
 /// player da prévia só aceita uma faixa por arquivo num grupo de áudio), a
 /// forma de onda dela pra linha do tempo, o que tapa os vãos da prévia (um
 /// silêncio no som e um vídeo preto na imagem) e as listas de cortes que a
 /// prévia abre.
-class AudioCache {
-  AudioCache(this._ffmpeg);
+class MediaCache {
+  MediaCache(this._ffmpeg);
 
   final FfmpegService _ffmpeg;
 

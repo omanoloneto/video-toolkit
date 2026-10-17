@@ -12,7 +12,7 @@ import 'package:path/path.dart' as p;
 
 import '../models/program.dart';
 import '../models/tracks.dart';
-import '../services/audio_cache.dart';
+import '../services/media_cache.dart';
 import '../services/ffmpeg_service.dart';
 import '../services/preview_plan.dart';
 import '../theme/app_themes.dart';
@@ -62,7 +62,7 @@ class _EditorScreenState extends State<EditorScreen> {
 
   // a prévia toca o programa montado (lista de cortes) a partir de cópias
   // das faixas de áudio; recarrega só quando o que se vê ou ouve muda
-  AudioCache? _audio;
+  MediaCache? _media;
   PreviewPlan? _shownPlan;
   Timer? _previewTimer;
   int _previewRun = 0;
@@ -87,7 +87,7 @@ class _EditorScreenState extends State<EditorScreen> {
     _playingSub?.cancel();
     _player?.dispose();
     _previewTimer?.cancel();
-    _releaseAudio();
+    _releaseMedia();
     super.dispose();
   }
 
@@ -95,16 +95,16 @@ class _EditorScreenState extends State<EditorScreen> {
   // isso o FFmpeg segue copiando e a pasta temporária fica
   Future<AppExitResponse> _releaseForExit() async {
     _previewTimer?.cancel();
-    await Future.wait([_releasePlayer(), _releaseAudio()]);
+    await Future.wait([_releasePlayer(), _releaseMedia()]);
     return AppExitResponse.exit;
   }
 
-  Future<void> _releaseAudio() async {
-    final audio = _audio;
-    _audio = null;
-    if (audio == null) return;
-    audio.revision.removeListener(_onAudioReady);
-    await audio.dispose();
+  Future<void> _releaseMedia() async {
+    final cache = _media;
+    _media = null;
+    if (cache == null) return;
+    cache.revision.removeListener(_onMediaReady);
+    await cache.dispose();
   }
 
   Future<void> _releasePlayer() async {
@@ -126,7 +126,7 @@ class _EditorScreenState extends State<EditorScreen> {
     await player?.dispose();
   }
 
-  void _onAudioReady() {
+  void _onMediaReady() {
     // o cache avisa de dentro do build às vezes (ao pedir uma forma de onda)
     scheduleMicrotask(() {
       if (!mounted) return;
@@ -149,14 +149,14 @@ class _EditorScreenState extends State<EditorScreen> {
     setState(() => _loading = true);
     try {
       final info = await _ffmpeg.probe(path);
-      _releaseAudio();
-      final audio = AudioCache(_ffmpeg)..revision.addListener(_onAudioReady);
-      _audio = audio;
-      audio.prefetch([
+      _releaseMedia();
+      final cache = MediaCache(_ffmpeg)..revision.addListener(_onMediaReady);
+      _media = cache;
+      cache.prefetch([
         for (final track in info.tracks.where((t) => t.type == TrackType.audio))
           AudioSource(path: info.path, audioTypeIndex: track.typeIndex),
       ]);
-      audio.silence();
+      cache.silence();
       setState(() {
         _file = info;
         _added.clear();
@@ -276,24 +276,24 @@ class _EditorScreenState extends State<EditorScreen> {
     _previewTimer?.cancel();
     final player = _player;
     final file = _file;
-    final audio = _audio;
-    if (player == null || file == null || audio == null) return;
+    final cache = _media;
+    if (player == null || file == null || cache == null) return;
     final frame = programFrame(file);
     final silenced = <AudioSource>{};
     final plan = buildPreviewPlan(
       file: file,
       added: _added,
       monitor: _monitorLane,
-      audioFile: audio.extracted,
+      audioFile: cache.extracted,
       unavailable: (source) {
-        final failed = audio.failed(source);
+        final failed = cache.failed(source);
         if (failed) silenced.add(source);
         return failed;
       },
-      silenceFile: audio.silence(),
+      silenceFile: cache.silence(),
       blackFile: frame == null
           ? null
-          : audio.blackVideo(
+          : cache.blackVideo(
               width: frame.width,
               height: frame.height,
               sarNum: frame.sarNum,
@@ -312,7 +312,7 @@ class _EditorScreenState extends State<EditorScreen> {
         media = path;
         audioId = audioTrack?.toString() ?? 'no';
       case EdlPreview(:final edl, :final hasAudio):
-        media = await audio.writeEdl(edl);
+        media = await cache.writeEdl(edl);
         audioId = hasAudio ? 'auto' : 'no';
       case PendingPreview():
         return;
@@ -1225,7 +1225,7 @@ class _EditorScreenState extends State<EditorScreen> {
                     onLaneEmptied: _onLaneEmptied,
                     onEditSubtitleOffset: _editSubtitleOffset,
                     onDeleteVideoClip: _deleteVideoClip,
-                    waveformOf: (source) => _audio?.waveform(source),
+                    waveformOf: (source) => _media?.waveform(source),
                   ),
                 ),
               ),

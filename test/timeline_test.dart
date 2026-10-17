@@ -2,7 +2,7 @@ import 'dart:typed_data';
 
 import 'package:video_toolkit/models/program.dart';
 import 'package:video_toolkit/models/tracks.dart';
-import 'package:video_toolkit/services/audio_cache.dart';
+import 'package:video_toolkit/services/media_cache.dart';
 import 'package:video_toolkit/widgets/timeline_panel.dart';
 import 'package:fluent_ui/fluent_ui.dart';
 import 'package:flutter/gestures.dart';
