@@ -34,11 +34,12 @@ Future<void> main() async {
       .writeAsString('@echo %1 > "${marker.path}"\r\n');
 
   final zip = p.join(work.path, 'VideoToolkit-windows.zip');
+  String q(String value) => "'${value.replaceAll("'", "''")}'";
   final zipped = await Process.run('powershell.exe', [
     '-NoProfile',
     '-Command',
-    "Compress-Archive -Path '${p.join(fresh.path, '*')}' "
-        "-DestinationPath '$zip'",
+    'Compress-Archive -Path ${q(p.join(fresh.path, '*'))} '
+        '-DestinationPath ${q(zip)}',
   ]);
   _check(zipped.exitCode == 0, 'zip: ${zipped.stderr}');
 
