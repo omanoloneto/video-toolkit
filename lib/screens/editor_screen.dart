@@ -1065,6 +1065,7 @@ class _EditorScreenState extends State<EditorScreen> {
             sourceStart: 0,
             sourceEnd: track.durationSeconds,
             timelineStart: 0,
+            sourceDuration: track.durationSeconds,
           ));
         }
       } else {

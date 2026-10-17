@@ -7,11 +7,15 @@ abstract class TimelinePiece {
     required this.sourceStart,
     required this.sourceEnd,
     required this.timelineStart,
+    this.sourceDuration = double.infinity,
   });
 
   double sourceStart;
   double sourceEnd;
   double timelineStart;
+
+  /// Quanto a origem tem: até onde dá pra esticar o trecho.
+  final double sourceDuration;
 
   double get duration => sourceEnd - sourceStart;
   double get timelineEnd => timelineStart + duration;
@@ -51,6 +55,7 @@ class AudioSegment extends TimelinePiece {
     required super.sourceStart,
     required super.sourceEnd,
     required super.timelineStart,
+    super.sourceDuration,
   });
 
   final AudioSource source;
@@ -66,6 +71,7 @@ class AudioSegment extends TimelinePiece {
         sourceStart: sourceStart,
         sourceEnd: sourceEnd,
         timelineStart: timelineStart,
+        sourceDuration: sourceDuration,
       );
 
   AudioSegment copy() => slice(
@@ -82,6 +88,7 @@ class SubtitlePiece extends TimelinePiece {
     required super.sourceStart,
     required super.sourceEnd,
     required super.timelineStart,
+    super.sourceDuration,
   });
 
   @override
@@ -94,6 +101,7 @@ class SubtitlePiece extends TimelinePiece {
         sourceStart: sourceStart,
         sourceEnd: sourceEnd,
         timelineStart: timelineStart,
+        sourceDuration: sourceDuration,
       );
 }
 
@@ -110,6 +118,7 @@ class VideoClip extends TimelinePiece {
     required super.sourceStart,
     required super.sourceEnd,
     required super.timelineStart,
+    super.sourceDuration,
   });
 
   final String path;
@@ -148,6 +157,7 @@ class VideoClip extends TimelinePiece {
         sourceStart: sourceStart,
         sourceEnd: sourceEnd,
         timelineStart: timelineStart,
+        sourceDuration: sourceDuration,
       );
 }
 

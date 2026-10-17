@@ -191,6 +191,21 @@ void main() {
     expect(clipAt(clips, 594), isNull);
   });
 
+  test('pieces cut apart remember how much source there is', () {
+    final pieces = [
+      AudioSegment(
+        source: const AudioSource(path: kSource, audioTypeIndex: 0),
+        sourceStart: 0,
+        sourceEnd: 600,
+        timelineStart: 0,
+        sourceDuration: 600,
+      ),
+    ];
+    rippleDelete(pieces, 90, 120);
+    splitSegment(pieces, pieces.last, 300);
+    expect(pieces.map((p) => p.sourceDuration), everyElement(600));
+  });
+
   test('a fresh file is an untouched program', () {
     expect(programUntouched(_file([_video(), _audio(0)])), isTrue);
   });

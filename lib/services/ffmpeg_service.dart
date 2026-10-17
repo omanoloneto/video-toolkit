@@ -168,6 +168,7 @@ class FfmpegService {
           sourceStart: 0,
           sourceEnd: track.durationSeconds,
           timelineStart: 0,
+          sourceDuration: track.durationSeconds,
         ));
       }
       if (type == TrackType.video &&
@@ -218,6 +219,7 @@ class FfmpegService {
           sourceStart: 0,
           sourceEnd: track.durationSeconds,
           timelineStart: 0,
+          sourceDuration: track.durationSeconds,
         ));
       }
       return track;
@@ -278,6 +280,7 @@ class FfmpegService {
       sourceStart: 0,
       sourceEnd: duration,
       timelineStart: 0,
+      sourceDuration: duration,
     );
   }
 

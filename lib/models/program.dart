@@ -197,6 +197,7 @@ class ProgramEdit {
           sourceStart: clip.sourceStart,
           sourceEnd: math.min(clip.sourceEnd, audioDuration),
           timelineStart: position,
+          sourceDuration: audioDuration,
         ))
         ..sort((a, b) => a.timelineStart.compareTo(b.timelineStart));
     }
