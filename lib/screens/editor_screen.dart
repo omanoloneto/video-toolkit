@@ -24,6 +24,9 @@ import '../widgets/timeline_panel.dart';
 
 const kLogoAsset = 'assets/logo.png';
 
+Duration _durationOf(double seconds) =>
+    Duration(milliseconds: (seconds * 1000).round());
+
 class EditorScreen extends StatefulWidget {
   const EditorScreen({super.key, this.initialPath});
 
@@ -62,6 +65,9 @@ class _EditorScreenState extends State<EditorScreen> {
   PreviewPlan? _shownPlan;
   Timer? _previewTimer;
   int _previewRun = 0;
+  // o mpv recusa seek enquanto abre um programa: o cursor mexido nesse meio
+  // tempo vai quando ele termina de abrir
+  Future<void>? _opening;
   final _warnedFiles = <String>{};
 
   @override
@@ -202,7 +208,7 @@ class _EditorScreenState extends State<EditorScreen> {
   void _seekPlayer(double seconds) {
     _seekTarget = seconds;
     _seekGuard = DateTime.now().add(const Duration(milliseconds: 600));
-    _player?.seek(Duration(milliseconds: (seconds * 1000).round()));
+    if (_opening == null) _player?.seek(_durationOf(seconds));
   }
 
   /// O player toca o programa montado: o instante dele é o da linha do tempo.
@@ -297,10 +303,26 @@ class _EditorScreenState extends State<EditorScreen> {
     final at = _playhead;
     _seekTarget = at;
     _seekGuard = DateTime.now().add(const Duration(milliseconds: 1500));
-    await player.open(
-      Media(media, start: Duration(milliseconds: (at * 1000).round())),
-      play: _isPlaying,
-    );
+    final opening = _openAt(player, media, at);
+    _opening = opening;
+    try {
+      await opening;
+    } finally {
+      if (identical(_opening, opening)) _opening = null;
+    }
+    if (identical(player, _player) && _seekTarget != at) {
+      _seekPlayer(_seekTarget);
+    }
+  }
+
+  /// Abre [media] em [at] e espera o mpv carregar: o open do media_kit volta
+  /// antes. Arquivo que não abre não segura a prévia.
+  Future<void> _openAt(Player player, String media, double at) async {
+    await player.open(Media(media, start: _durationOf(at)), play: _isPlaying);
+    if (player.state.duration > Duration.zero) return;
+    await player.stream.duration
+        .timeout(const Duration(seconds: 5), onTimeout: (sink) => sink.close())
+        .firstWhere((d) => d > Duration.zero, orElse: () => Duration.zero);
   }
 
   void _warnSilenced(Set<AudioSource> sources) {
