@@ -232,10 +232,14 @@ class AudioCache {
 
   Future<void> _measure(AudioSource source, String copy) async {
     final peaks = PeakBuilder(sampleRate: _waveformSampleRate);
+    // nos tempos da cópia, como o salvar corta: atraso inicial e vãos viram
+    // silêncio em vez de puxar o som pra trás
     final measured = await _run(
       [
+        '-copyts',
         '-i', copy,
         '-map', '0:a:0',
+        '-af', 'aresample=first_pts=0',
         '-ac', '1',
         '-ar', '$_waveformSampleRate',
         '-f', 's16le',

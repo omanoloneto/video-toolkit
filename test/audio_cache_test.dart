@@ -18,8 +18,8 @@ Uint8List _pcm(List<int> samples) {
   return data.buffer.asUint8List();
 }
 
-Float32List _peaksOf(List<int> samples) =>
-    (PeakBuilder(sampleRate: 8000)..add(_pcm(samples))).finish();
+Float32List _peaksOf(List<int> samples, {int sampleRate = 8000}) =>
+    (PeakBuilder(sampleRate: sampleRate)..add(_pcm(samples))).finish();
 
 Future<void> _until(AudioCache cache, bool Function() ready) async {
   final done = Completer<void>();
@@ -66,18 +66,24 @@ void main() {
       expect(split.finish(), whole);
     });
 
-    test('known samples land in their buckets', () {
-      final perBucket = (8000 / kWaveformBucketsPerSecond).round();
-      final samples = List.filled(3 * perBucket, 0)
-        ..[3] = 3277
-        ..[perBucket + 5] = -16384
-        ..[2 * perBucket - 1] = 4096
-        ..[2 * perBucket] = -32768;
-      final peaks = _peaksOf(samples);
-      expect(peaks, hasLength(3));
-      expect(peaks[0], closeTo(0.1, 1e-4));
-      expect(peaks[1], 0.5);
-      expect(peaks[2], 1);
+    test('known samples land in their buckets, edges included', () {
+      // um valor por bloco, colado na borda: cair do lado errado muda a lista
+      List<int> onEdges(int length, List<int> indexes) {
+        const values = [3277, -16384, 4096, -32768];
+        final samples = List.filled(length, 0);
+        for (var k = 0; k < indexes.length; k++) {
+          samples[indexes[k]] = values[k];
+        }
+        return samples;
+      }
+
+      final expected = [closeTo(0.1, 1e-4), 0.5, 0.125, 1];
+      expect(_peaksOf(onEdges(160, [39, 40, 119, 120])), expected);
+      // 110,25 amostras por bloco: a borda arredonda pra cima
+      expect(
+        _peaksOf(onEdges(441, [110, 111, 330, 331]), sampleRate: 22050),
+        expected,
+      );
     });
 
     test('keeps the last partial bucket', () {
@@ -173,8 +179,10 @@ void main() {
         '-i', "aevalsrc='if(lt(t,2),0.5*sin(2*PI*440*t),0)':s=48000:d=4",
         '-f', 'lavfi',
         '-i', "aevalsrc='if(gte(t,2),0.5*sin(2*PI*660*t),0)':s=48000:d=4",
-        '-map', '0', '-map', '1', '-map', '2',
-        '-c:v', 'mpeg4', '-c:a:0', 'aac', '-c:a:1', 'flac',
+        '-itsoffset', '1',
+        '-f', 'lavfi', '-i', "aevalsrc='0.5*sin(2*PI*880*t)':s=48000:d=3",
+        '-map', '0', '-map', '1', '-map', '2', '-map', '3',
+        '-c:v', 'mpeg4', '-c:a:0', 'aac', '-c:a:1', 'flac', '-c:a:2', 'aac',
         movie,
       ]);
       expect(made.exitCode, 0, reason: '${made.stderr}');
@@ -183,21 +191,26 @@ void main() {
       addTearDown(cache.dispose);
       final toneFirst = AudioSource(path: movie, audioTypeIndex: 0);
       final toneLast = AudioSource(path: movie, audioTypeIndex: 1);
+      final delayed = AudioSource(path: movie, audioTypeIndex: 2);
       final missing =
           AudioSource(path: p.join(dir.path, 'missing.mkv'), audioTypeIndex: 0);
-      cache.prefetch([toneFirst, toneLast, missing]);
+      cache.prefetch([toneFirst, toneLast, delayed, missing]);
       expect(cache.silence(), isNull);
       await _until(
         cache,
         () =>
             cache.failed(missing) &&
             cache.silence() != null &&
-            [toneFirst, toneLast].every(
+            [toneFirst, toneLast, delayed].every(
                 (s) => cache.extracted(s) != null && cache.waveform(s) != null),
       );
 
       expect(cache.extracted(missing), isNull);
-      for (final (source, codec) in [(toneFirst, 'aac'), (toneLast, 'flac')]) {
+      for (final (source, codec) in [
+        (toneFirst, 'aac'),
+        (toneLast, 'flac'),
+        (delayed, 'aac'),
+      ]) {
         expect(cache.failed(source), isFalse);
         final streams = (await _probe(ffprobe, cache.extracted(source)!))[
             'streams'] as List;
@@ -215,6 +228,11 @@ void main() {
       expect(first.peakBetween(2.25, 3.75), lessThan(0.01));
       expect(last.peakBetween(0.25, 1.75), lessThan(0.01));
       expect(last.peakBetween(2.25, 3.75), greaterThan(0.3));
+
+      final startsLate = cache.waveform(delayed)!;
+      expect(startsLate.duration, closeTo(4, 0.1));
+      expect(startsLate.peakBetween(0.25, 0.75), lessThan(0.01));
+      expect(startsLate.peakBetween(1.25, 3.75), greaterThan(0.3));
 
       final silence = await _probe(ffprobe, cache.silence()!);
       final duration = (silence['format'] as Map)['duration'] as String;
