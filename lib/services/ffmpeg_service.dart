@@ -785,20 +785,30 @@ class FfmpegService {
 
     // Programa editado: cada trecho vira uma entrada com busca própria (-ss)
     // e corte exato no filtro; tudo é encaixado no quadro do vídeo original.
+    // O vão antes do primeiro trecho ou entre dois deles sai preto.
     String programLabel(List<VideoClip> clips) {
       final ordered = [...clips]
         ..sort((a, b) => a.timelineStart.compareTo(b.timelineStart));
       final frame = ordered.firstWhere((c) => c.path == source.path,
           orElse: () => ordered.first);
+      final setsar = 'setsar=${frame.sarNum}/${frame.sarDen}';
       final labels = <String>[];
+      var cursor = 0.0;
       for (var k = 0; k < ordered.length; k++) {
         final clip = ordered[k];
+        if (clip.timelineStart > cursor + 1e-3) {
+          filterChains.add(
+              'color=c=black:s=${frame.width}x${frame.height}:r=${frame.rate}'
+              ':d=${_s3(clip.timelineStart - cursor)},$setsar[pg$k]');
+          labels.add('pg$k');
+        }
+        cursor = math.max(cursor, clip.timelineEnd);
         final input = inputFor(clip.path, flags: ['-ss', _s3(clip.sourceStart)]);
         final fit = _fitFilter(clip, frame);
         filterChains.add('[$input:v:${clip.streamTypeIndex}]'
             'trim=duration=${_s3(clip.duration)},setpts=PTS-STARTPTS'
             '${fit == null ? '' : ',$fit'}'
-            ',setsar=${frame.sarNum}/${frame.sarDen},fps=${frame.rate}[pv$k]');
+            ',$setsar,fps=${frame.rate}[pv$k]');
         labels.add('pv$k');
       }
       filterChains.add('${labels.map((l) => '[$l]').join()}'

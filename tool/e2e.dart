@@ -208,6 +208,46 @@ Future<void> main() async {
               text.contains('00:00:04,000 --> 00:00:05,000'),
           text.replaceAll('\n', ' | '));
     }
+
+    // -------------------------------------------------- program gaps
+    // vídeo afastado sem mexer no áudio: o vão fica preto no tempo exato e
+    // o áudio segue inteiro, tocando por baixo do preto
+    final between = await service.probe(src);
+    final halves = between.mainVideo!.clips;
+    splitSegment(halves, halves.single, 2);
+    halves.last.timelineStart = 3;
+    final leading = await service.probe(src);
+    leading.mainVideo!.clips.single.timelineStart = 1;
+
+    for (final (name, file, black, picture) in [
+      ('gap between clips', between, (2.0, 3.0), [1.0, 4.5]),
+      ('leading gap', leading, (0.0, 1.0), [1.5, 4.5]),
+    ]) {
+      final out = '${dir.path}/${name.replaceAll(' ', '-')}.mkv';
+      result = await service.save(source: file, added: [], outputPath: out);
+      check('$name save succeeds', result.success, result.errorTail);
+      if (!result.success) continue;
+
+      final video = await _streamEnd(service.ffprobePath!, out, 'v:0');
+      check('$name: video lasts 7s', (video - 7).abs() < 0.1,
+          video.toStringAsFixed(3));
+      final blacks = await _blackIntervals(service.ffmpegPath!, out);
+      check('$name: black from ${black.$1}s to ${black.$2}s only',
+          blacks.length == 1 &&
+              (blacks.single.$1 - black.$1).abs() < 0.1 &&
+              (blacks.single.$2 - black.$2).abs() < 0.1,
+          '$blacks');
+      check('$name: picture at ${picture.join('s and ')}s',
+          picture.every((t) => !blacks.any((b) => b.$1 <= t && t < b.$2)),
+          '$blacks');
+      final audio = await _streamEnd(service.ffprobePath!, out, 'a:0');
+      check('$name: audio keeps its own 6s', (audio - 6).abs() < 0.1,
+          audio.toStringAsFixed(3));
+      final under = await _meanVolume(service.ffmpegPath!, out,
+          black.$1 + 0.2, black.$2 - 0.2, 'anull');
+      check('$name: audio plays under the black', under > -30,
+          '${under.toStringAsFixed(1)}dB');
+    }
   } finally {
     await dir.delete(recursive: true);
   }
@@ -240,6 +280,37 @@ Future<double> _mediaDuration(String ffprobe, String path) async {
     '-v', 'quiet', '-show_entries', 'format=duration', '-of', 'csv=p=0', path,
   ]);
   return double.tryParse((result.stdout as String).trim()) ?? 0;
+}
+
+/// Where the last packet of [stream] (e.g. v:0) in [path] ends, in seconds.
+Future<double> _streamEnd(String ffprobe, String path, String stream) async {
+  final result = await Process.run(ffprobe, [
+    '-v', 'quiet', '-select_streams', stream,
+    '-show_entries', 'packet=pts_time,duration_time', '-of', 'csv=p=0', path,
+  ]);
+  var end = 0.0;
+  for (final line in const LineSplitter().convert(result.stdout as String)) {
+    final fields = line.split(',');
+    final pts = double.tryParse(fields.first) ?? 0.0;
+    final duration =
+        fields.length > 1 ? double.tryParse(fields[1]) ?? 0.0 : 0.0;
+    if (pts + duration > end) end = pts + duration;
+  }
+  return end;
+}
+
+/// Black stretches of the video in [path], as (start, end) in seconds.
+Future<List<(double, double)>> _blackIntervals(
+    String ffmpeg, String path) async {
+  final result = await Process.run(ffmpeg, [
+    '-hide_banner', '-i', path, '-map', '0:v:0',
+    '-vf', 'blackdetect=d=0.1:pix_th=0.1',
+    '-f', 'null', '-',
+  ]);
+  return RegExp(r'black_start:([\d.]+) black_end:([\d.]+)')
+      .allMatches(result.stderr as String)
+      .map((m) => (double.parse(m.group(1)!), double.parse(m.group(2)!)))
+      .toList();
 }
 
 /// Mean volume (dB) of [path] between [from] and [to] after [filter].

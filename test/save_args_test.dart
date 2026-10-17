@@ -37,13 +37,18 @@ MediaTrack _audio(int streamIndex, int typeIndex, {double duration = 600}) {
 }
 
 VideoClip _clip(String path, double start, double end,
-        {int width = 1432, int height = 1080}) =>
+        {int width = 1432,
+        int height = 1080,
+        int sarNum = 1,
+        int sarDen = 1}) =>
     VideoClip(
       path: path,
       streamTypeIndex: 0,
       width: width,
       height: height,
       rate: '2997/100',
+      sarNum: sarNum,
+      sarDen: sarDen,
       sourceStart: start,
       sourceEnd: end,
       timelineStart: 0,
@@ -542,6 +547,61 @@ void main() {
       expect(filter, contains('[pv0][pv1]concat=n=2:v=1:a=0[program]'));
       expect(filter, contains('[3:a:0]atrim=start=0.000:end=84.000'));
       expect(joined, contains('-c:v:0 libx265'));
+    });
+
+    test('a gap before the first clip is black in the program frame', () {
+      final video = _video()
+        ..clips.add(_clip(kSource, 0, 600, sarNum: 32, sarDen: 27)
+          ..timelineStart = 2.5);
+
+      final result = service.buildSaveArgs(
+        source: _file([video, _audio(1, 0)]),
+        added: [],
+        outputPath: '/tmp/out.mkv',
+      );
+      final filter = result.args[result.args.indexOf('-filter_complex') + 1];
+
+      expect(filter, contains('color=c=black:s=1432x1080:r=2997/100:d=2.500,'
+          'setsar=32/27[pg0]'));
+      expect(filter, contains('[1:v:0]trim=duration=600.000,'
+          'setpts=PTS-STARTPTS,setsar=32/27,fps=2997/100[pv0]'));
+      expect(filter, contains('[pg0][pv0]concat=n=2:v=1:a=0[program]'));
+    });
+
+    test('a gap between two clips is black and the audio stays whole', () {
+      final video = _programVideo();
+      splitSegment(video.clips, video.clips.single, 300);
+      video.clips.last.timelineStart = 310;
+
+      final result = service.buildSaveArgs(
+        source: _file([video, _audio(1, 0)]),
+        added: [],
+        outputPath: '/tmp/out.mkv',
+      );
+      final joined = result.args.join(' ');
+      final filter = result.args[result.args.indexOf('-filter_complex') + 1];
+
+      expect(joined, contains('-ss 300.000 -i $kSource'));
+      expect(filter, contains('color=c=black:s=1432x1080:r=2997/100:d=10.000,'
+          'setsar=1/1[pg1]'));
+      expect(filter, contains('[pv0][pg1][pv1]concat=n=3:v=1:a=0[program]'));
+      expect(joined, contains('-map 0:a:0'));
+    });
+
+    test('clips less than 1 ms apart touch, with no black between them', () {
+      final video = _programVideo();
+      splitSegment(video.clips, video.clips.single, 300);
+      video.clips.last.timelineStart = 300.0009;
+
+      final result = service.buildSaveArgs(
+        source: _file([video, _audio(1, 0)]),
+        added: [],
+        outputPath: '/tmp/out.mkv',
+      );
+      final filter = result.args[result.args.indexOf('-filter_complex') + 1];
+
+      expect(filter, isNot(contains('color=')));
+      expect(filter, contains('[pv0][pv1]concat=n=2:v=1:a=0[program]'));
     });
 
     test('compacting an untouched file keeps it whole but shrinks it', () {
