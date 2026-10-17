@@ -136,6 +136,24 @@ void main() {
       expect(filter, contains('asetpts=N/SR/TB[lane0]'));
     });
 
+    test('a piece keeps its place in the source, even in a late stream', () {
+      final a1 = _audio(1, 0);
+      a1.segments.single
+        ..sourceStart = 60
+        ..sourceEnd = 300
+        ..timelineStart = 30;
+
+      final args = service.buildSaveArgs(
+        source: _file([_video(), a1]),
+        added: [],
+        outputPath: '/tmp/out.mkv',
+      );
+      final filter = args.args[args.args.indexOf('-filter_complex') + 1];
+      expect(filter, contains('[0:a:0]atrim=start=60.000:end=300.000,'
+          'asetpts=PTS-60.000/TB,aresample=48000:first_pts=0,'
+          'aformat=channel_layouts=stereo,adelay=30000:all=1[l0s0]'));
+    });
+
     test('whole-track delay keeps stream copy via -itsoffset', () {
       final a1 = _audio(1, 0);
       a1.segments.single.timelineStart = 2.5;

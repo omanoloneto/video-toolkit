@@ -406,6 +406,41 @@ Future<void> main() async {
           defaults.length == 2 && defaults[0] == 0 && defaults[1] == 1,
           '$defaults');
     }
+
+    // -------------------------------------------------- audio that starts late
+    // faixa que começa 1 s depois do vídeo, dividida em dois: o tom continua
+    // começando em 1 s, como na prévia e na forma de onda
+    final lateSrc = '${dir.path}/audio-atrasado.mkv';
+    await _run(service.ffmpegPath!, [
+      '-y',
+      '-f', 'lavfi', '-i', 'testsrc=duration=6:size=320x240:rate=25',
+      '-itsoffset', '1',
+      '-f', 'lavfi', '-i', 'sine=frequency=440:duration=5',
+      '-map', '0', '-map', '1',
+      '-c:v', 'libx264', '-c:a', 'aac',
+      lateSrc,
+    ]);
+    final lateAudio = await service.probe(lateSrc);
+    final lateLane = lateAudio.byType(TrackType.audio).single;
+    splitSegment(lateLane.segments, lateLane.segments.single, 3);
+    final lateOut = '${dir.path}/audio-atrasado-dividido.mkv';
+    result =
+        await service.save(source: lateAudio, added: [], outputPath: lateOut);
+    check('late audio split in two save succeeds', result.success,
+        result.errorTail);
+    if (result.success) {
+      final before =
+          await _meanVolume(service.ffmpegPath!, lateOut, 0.1, 0.95, 'anull');
+      final first =
+          await _meanVolume(service.ffmpegPath!, lateOut, 1.05, 2.9, 'anull');
+      final second =
+          await _meanVolume(service.ffmpegPath!, lateOut, 3.1, 5.5, 'anull');
+      check('late audio split in two still starts its tone at 1s',
+          before < -50 && first > -30 && second > -30,
+          'before=${before.toStringAsFixed(1)}dB '
+              'first=${first.toStringAsFixed(1)}dB '
+              'second=${second.toStringAsFixed(1)}dB');
+    }
   } finally {
     await dir.delete(recursive: true);
   }

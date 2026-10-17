@@ -652,10 +652,13 @@ class FfmpegService {
         for (var k = 0; k < ordered.length; k++) {
           final seg = ordered[k];
           final inputIndex = inputFor(seg.source.path);
+          // o trecho conta do começo dele na origem, não da primeira amostra:
+          // áudio que começa atrasado guarda o atraso, como na prévia
           final chain = StringBuffer(
               '[$inputIndex:a:${seg.source.audioTypeIndex}]'
               'atrim=start=${_s3(seg.sourceStart)}:end=${_s3(seg.sourceEnd)},'
-              'asetpts=PTS-STARTPTS,aresample=48000');
+              'asetpts=PTS-${_s3(seg.sourceStart)}/TB,'
+              'aresample=48000:first_pts=0');
           if (channelLayout != null) {
             chain.write(',aformat=channel_layouts=$channelLayout');
           }
