@@ -1,4 +1,7 @@
+import 'dart:typed_data';
+
 import 'package:video_toolkit/models/tracks.dart';
+import 'package:video_toolkit/services/audio_cache.dart';
 import 'package:video_toolkit/widgets/timeline_panel.dart';
 import 'package:fluent_ui/fluent_ui.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -20,6 +23,7 @@ MediaTrack _audio(int typeIndex, {double duration = 100}) {
     sourceStart: 0,
     sourceEnd: duration,
     timelineStart: 0,
+    sourceDuration: duration,
   ));
   return track;
 }
@@ -49,6 +53,7 @@ MediaTrack _video() => MediaTrack(
         sourceStart: 0,
         sourceEnd: 100,
         timelineStart: 0,
+        sourceDuration: 100,
       ));
 
 Widget _wrap({
@@ -56,6 +61,7 @@ Widget _wrap({
   required TimelineSelection? selection,
   required ValueChanged<TimelineSelection?> onSelectionChanged,
   ValueChanged<VideoClip>? onDeleteVideoClip,
+  Waveform? Function(AudioSource source)? waveformOf,
 }) {
   var playhead = 0.0;
   return FluentApp(
@@ -78,6 +84,7 @@ Widget _wrap({
           onLaneEmptied: (_) {},
           onEditSubtitleOffset: (_) {},
           onDeleteVideoClip: onDeleteVideoClip ?? (_) {},
+          waveformOf: waveformOf ?? (_) => null,
         ),
       ),
     ),
@@ -209,6 +216,92 @@ void main() {
     await tester.tap(find.text('Excluir trecho'));
     await tester.pump(const Duration(milliseconds: 500));
     expect(deleted, same(video.clips.first));
+  });
+
+  Finder handle(Object piece, String which) => find.descendant(
+        of: find.byKey(ValueKey<Object>(piece)),
+        matching: find.byKey(ValueKey(which)),
+      );
+
+  testWidgets('the edges of an audio segment shrink it and stop at the source',
+      (tester) async {
+    await useDesktopSurface(tester);
+    final audio = _audio(0);
+    final file = _file([audio]);
+    final seg = audio.segments.single..sourceEnd = 60;
+
+    await tester.pumpWidget(_wrap(
+      file: file,
+      selection: null,
+      onSelectionChanged: (_) {},
+    ));
+
+    await tester.drag(handle(seg, 'trim-start'), const Offset(100, 0));
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(seg.sourceStart, greaterThan(0));
+    // o resto do áudio não muda de lugar
+    expect(seg.timelineStart, closeTo(seg.sourceStart, 1e-9));
+    expect(seg.timelineEnd, closeTo(60, 1e-9));
+
+    // esticar a direita para no fim do que a origem tem
+    await tester.drag(handle(seg, 'trim-end'), const Offset(2000, 0));
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(seg.sourceEnd, closeTo(100, 1e-9));
+  });
+
+  testWidgets('dragging a video edge trims the program and the audio follows',
+      (tester) async {
+    await useDesktopSurface(tester);
+    final video = _video();
+    final audio = _audio(0);
+    final file = _file([video, audio]);
+    final clip = video.clips.single;
+
+    await tester.pumpWidget(_wrap(
+      file: file,
+      selection: null,
+      onSelectionChanged: (_) {},
+    ));
+
+    await tester.drag(handle(clip, 'trim-start'), const Offset(100, 0));
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(video.clips.single, same(clip));
+    expect(clip.sourceStart, greaterThan(0));
+    expect(clip.timelineStart, 0);
+    final seg = audio.segments.single;
+    expect(seg.sourceStart, closeTo(clip.sourceStart, 1e-6));
+    expect(seg.timelineStart, 0);
+  });
+
+  testWidgets('audio segments draw the waveform of their source',
+      (tester) async {
+    await useDesktopSurface(tester);
+    final audio = _audio(0);
+    final file = _file([audio]);
+    final waveform = Waveform(Float32List.fromList(
+        List.generate(100 * 200, (i) => (i % 200) / 200)));
+    final asked = <AudioSource>[];
+
+    await tester.pumpWidget(_wrap(
+      file: file,
+      selection: null,
+      onSelectionChanged: (_) {},
+      waveformOf: (source) {
+        asked.add(source);
+        return waveform;
+      },
+    ));
+
+    expect(asked, contains(audio.segments.single.source));
+    expect(
+      find.descendant(
+        of: find.byKey(ValueKey<Object>(audio.segments.single)),
+        matching: find.byType(CustomPaint),
+      ),
+      findsWidgets,
+    );
+    expect(tester.takeException(), isNull);
   });
 
   test('parseTimelineTime handles the common formats', () {

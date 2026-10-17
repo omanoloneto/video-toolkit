@@ -11,7 +11,9 @@ import 'package:path/path.dart' as p;
 
 import '../models/program.dart';
 import '../models/tracks.dart';
+import '../services/audio_cache.dart';
 import '../services/ffmpeg_service.dart';
+import '../services/preview_plan.dart';
 import '../theme/app_themes.dart';
 import '../theme/theme_icons.dart';
 import '../widgets/editor_keyboard.dart';
@@ -47,11 +49,20 @@ class _EditorScreenState extends State<EditorScreen> {
   bool _isPlaying = false;
   double _playhead = 0;
   Object? _monitorLane;
-  double? _appliedDelay;
 
   // depois de um seek, o player ainda manda posições antigas por um instante
   double _seekTarget = 0;
   DateTime? _seekGuard;
+
+  // a prévia toca o programa montado (lista de cortes) a partir de cópias
+  // das faixas de áudio; recarrega só quando o que se vê ou ouve muda
+  AudioCache? _audio;
+  PreviewPlan? _shownPlan;
+  Timer? _previewTimer;
+  int _previewRun = 0;
+  Directory? _edlDir;
+  String? _lastEdl;
+  bool _audioFailureShown = false;
 
   @override
   void initState() {
@@ -64,7 +75,28 @@ class _EditorScreenState extends State<EditorScreen> {
     _positionSub?.cancel();
     _playingSub?.cancel();
     _player?.dispose();
+    _previewTimer?.cancel();
+    _releaseAudio();
+    final edlDir = _edlDir;
+    if (edlDir != null) edlDir.delete(recursive: true).ignore();
     super.dispose();
+  }
+
+  void _releaseAudio() {
+    final audio = _audio;
+    _audio = null;
+    if (audio == null) return;
+    audio.revision.removeListener(_onAudioReady);
+    audio.dispose();
+  }
+
+  void _onAudioReady() {
+    // o cache avisa de dentro do build às vezes (ao pedir uma forma de onda)
+    scheduleMicrotask(() {
+      if (!mounted) return;
+      setState(() {});
+      _applyPreview();
+    });
   }
 
   Future<void> _checkFfmpeg() async {
@@ -81,14 +113,23 @@ class _EditorScreenState extends State<EditorScreen> {
     setState(() => _loading = true);
     try {
       final info = await _ffmpeg.probe(path);
+      _releaseAudio();
+      final audio = AudioCache(_ffmpeg)..revision.addListener(_onAudioReady);
+      _audio = audio;
+      audio.prefetch([
+        for (final track in info.tracks.where((t) => t.type == TrackType.audio))
+          AudioSource(path: info.path, audioTypeIndex: track.typeIndex),
+      ]);
+      audio.silence();
       setState(() {
         _file = info;
         _added.clear();
         _selection = null;
         _playhead = 0;
         _monitorLane = null;
+        _audioFailureShown = false;
       });
-      await _initPlayer(path);
+      await _initPlayer();
     } catch (e) {
       _showError('Não foi possível ler o arquivo', e.toString());
     } finally {
@@ -98,7 +139,7 @@ class _EditorScreenState extends State<EditorScreen> {
 
   // ------------------------------------------------------------- playback
 
-  Future<void> _initPlayer(String path) async {
+  Future<void> _initPlayer() async {
     await _positionSub?.cancel();
     await _playingSub?.cancel();
     final old = _player;
@@ -109,12 +150,19 @@ class _EditorScreenState extends State<EditorScreen> {
         _isPlaying = false;
       });
     }
-    _appliedDelay = null;
+    _shownPlan = null;
     await old?.dispose();
 
     final player = Player();
     final controller = VideoController(player);
-    await player.open(Media(path), play: false);
+    final native = player.platform;
+    if (native is NativePlayer) {
+      // a faixa ouvida vem marcada com esse idioma na lista de cortes
+      await native.setProperty('alang', kMonitorLanguage);
+      // trechos de formatos diferentes não reiniciam a saída de som
+      await native.setProperty('audio-samplerate', '48000');
+      await native.setProperty('audio-channels', 'stereo');
+    }
 
     _positionSub = player.stream.position.listen((pos) {
       // While playing, the player drives the playhead; user scrubs drive
@@ -128,7 +176,7 @@ class _EditorScreenState extends State<EditorScreen> {
         return;
       }
       _seekGuard = null;
-      _followPlayer(seconds);
+      setState(() => _playhead = seconds);
     });
     _playingSub = player.stream.playing.listen((playing) {
       if (mounted) setState(() => _isPlaying = playing);
@@ -142,6 +190,7 @@ class _EditorScreenState extends State<EditorScreen> {
       _player = player;
       _videoController = controller;
     });
+    await _applyPreview();
   }
 
   List<VideoClip>? get _clips => _file?.mainVideo?.clips;
@@ -152,139 +201,112 @@ class _EditorScreenState extends State<EditorScreen> {
     return clips == null ? _file?.durationSeconds ?? 0 : programDuration(clips);
   }
 
-  void _seekSource(double seconds) {
+  void _seekPlayer(double seconds) {
     _seekTarget = seconds;
     _seekGuard = DateTime.now().add(const Duration(milliseconds: 600));
     _player?.seek(Duration(milliseconds: (seconds * 1000).round()));
   }
 
-  /// O player só tem o arquivo original: o instante do programa vira o
-  /// instante do original; num vídeo inserido a prévia para.
+  /// O player toca o programa montado: o instante dele é o da linha do tempo.
   void _onScrub(double t) {
     setState(() => _playhead = t);
-    final clips = _clips;
-    final file = _file;
-    final source =
-        clips == null || file == null ? t : sourceTimeAt(clips, file.path, t);
-    if (source == null) {
-      _player?.pause();
-    } else {
-      _seekSource(source);
-    }
-    _syncAudioDelay();
+    _seekPlayer(t);
   }
 
-  /// Leva a posição do player pro programa, pulando o que foi cortado.
-  void _followPlayer(double source) {
-    final clips = _clips;
-    final file = _file;
-    final clip = clips == null ? null : clipAt(clips, _playhead);
-    if (clips == null || file == null || clip == null || clip.path != file.path) {
-      setState(() => _playhead = clips == null ? source : _playhead);
-      _syncAudioDelay();
-      return;
-    }
-    if (source < clip.sourceEnd - 0.03) {
-      setState(() => _playhead = clip.timelineStart +
-          (source - clip.sourceStart).clamp(0.0, clip.duration));
-      _syncAudioDelay();
-      return;
-    }
-    final next = clipAfter(clips, clip);
-    if (next == null) {
-      _player?.pause();
-      setState(() => _playhead = _contentEnd);
-    } else if (next.path != file.path) {
-      _player?.pause();
-      setState(() => _playhead = next.timelineStart);
-    } else {
-      setState(() => _playhead = next.timelineStart);
-      if ((next.sourceStart - source).abs() > 0.1) _seekSource(next.sourceStart);
-    }
-    _syncAudioDelay();
-  }
-
-  void _togglePlay() {
+  Future<void> _togglePlay() async {
     final player = _player;
     if (player == null) return;
-    final clips = _clips;
-    final file = _file;
-    if (!_isPlaying && clips != null && file != null) {
-      var clip = clipAt(clips, _playhead);
-      if (clip == null) {
-        _onScrub(0);
-        clip = clipAt(clips, 0);
-      }
-      // a prévia não mostra vídeo inserido: toca a partir do próximo trecho
-      while (clip != null && clip.path != file.path) {
-        clip = clipAfter(clips, clip);
-      }
-      if (clip == null) return;
-      if (clip.timelineStart > _playhead) _onScrub(clip.timelineStart);
+    if (!_isPlaying) {
+      // quem acabou de editar ouve a edição, não a versão de antes
+      if (_previewTimer?.isActive ?? false) await _applyPreview();
+      if (_playhead >= _contentEnd - 0.05) _onScrub(0);
     }
-    _syncAudioDelay();
-    player.playOrPause();
+    await player.playOrPause();
   }
 
   void _stepSeconds(double delta) {
     _onScrub((_playhead + delta).clamp(0.0, _contentEnd));
   }
 
-  Future<void> _setMonitorLane(Object? lane) async {
-    final player = _player;
-    if (player == null) return;
+  void _setMonitorLane(Object? lane) {
     setState(() => _monitorLane = lane);
-
-    if (lane == null) {
-      await player.setAudioTrack(AudioTrack.auto());
-    } else if (lane is ExternalTrack) {
-      await player.setAudioTrack(AudioTrack.uri(lane.path, title: lane.title));
-    } else if (lane is MediaTrack) {
-      final real = player.state.tracks.audio
-          .where((t) => t.id != 'auto' && t.id != 'no')
-          .toList();
-      if (lane.typeIndex < real.length) {
-        await player.setAudioTrack(real[lane.typeIndex]);
-      }
-    }
-    _syncAudioDelay();
+    _applyPreview();
   }
 
-  /// Approximates the edited timeline while previewing: applies the shift
-  /// (timelineStart - sourceStart) of the monitored lane's segment under
-  /// the playhead as mpv's audio-delay.
-  void _syncAudioDelay() {
+  void _schedulePreview() {
+    _previewTimer?.cancel();
+    _previewTimer = Timer(const Duration(milliseconds: 300), _applyPreview);
+  }
+
+  /// Põe no player o programa como está agora; não recarrega o que não mudou.
+  Future<void> _applyPreview() async {
+    _previewTimer?.cancel();
     final player = _player;
-    if (player == null) return;
-    final segments = switch (_monitorLane) {
-      MediaTrack(:final segments) => segments,
-      ExternalTrack(:final segments) => segments,
-      _ => null,
-    };
-    var delay = 0.0;
-    if (segments != null && segments.isNotEmpty) {
-      final seg = segments
-              .where((s) =>
-                  s.timelineStart <= _playhead && _playhead < s.timelineEnd)
-              .firstOrNull ??
-          segments.first;
-      // a imagem também está deslocada quando o vídeo foi cortado
-      final clips = _clips;
-      final clip = clips == null ? null : clipAt(clips, _playhead);
-      final videoShift = clip == null ? 0.0 : clip.timelineStart - clip.sourceStart;
-      delay = seg.timelineStart - seg.sourceStart - videoShift;
+    final file = _file;
+    final audio = _audio;
+    if (player == null || file == null || audio == null) return;
+    final plan = buildPreviewPlan(
+      file: file,
+      added: _added,
+      monitor: _monitorLane,
+      audioFile: audio.extracted,
+      silenceFile: audio.silence(),
+    );
+    // uma montagem mais nova cancela a que ainda está gravando a lista
+    final run = ++_previewRun;
+    if (plan is PendingPreview) {
+      if (plan.missing.any(audio.failed)) _warnAudioFailure();
+      return;
     }
-    final applied = _appliedDelay;
-    if (applied != null && (applied - delay).abs() < 0.0005) return;
-    final platform = player.platform;
-    if (platform is NativePlayer) {
-      _appliedDelay = delay;
-      platform.setProperty('audio-delay', delay.toStringAsFixed(3));
+    if (plan == _shownPlan) return;
+    final String media;
+    final String audioId;
+    switch (plan) {
+      case SourcePreview(:final path, :final audioTrack):
+        media = path;
+        audioId = audioTrack?.toString() ?? 'no';
+      case EdlPreview(:final edl, :final hasAudio):
+        media = await _writeEdl(edl);
+        audioId = hasAudio ? 'auto' : 'no';
+      case PendingPreview():
+        return;
     }
+    if (run != _previewRun || !mounted || !identical(player, _player)) return;
+    _shownPlan = plan;
+    final native = player.platform;
+    if (native is NativePlayer) await native.setProperty('aid', audioId);
+    if (run != _previewRun || !identical(player, _player)) return;
+    final at = _playhead;
+    _seekTarget = at;
+    _seekGuard = DateTime.now().add(const Duration(milliseconds: 1500));
+    await player.open(
+      Media(media, start: Duration(milliseconds: (at * 1000).round())),
+      play: _isPlaying,
+    );
+  }
+
+  Future<String> _writeEdl(String edl) async {
+    final dir = _edlDir ??= await Directory.systemTemp.createTemp('vt-preview-edl-');
+    final file = File(p.join(dir.path, 'programa-$_previewRun.edl'));
+    await file.writeAsString(edl);
+    // o player já leu a lista anterior quando abriu
+    final previous = _lastEdl;
+    _lastEdl = file.path;
+    if (previous != null) File(previous).delete().ignore();
+    return file.path;
+  }
+
+  void _warnAudioFailure() {
+    if (_audioFailureShown) return;
+    _audioFailureShown = true;
+    _showError('Prévia sem a edição do áudio',
+        'Não deu pra preparar uma das faixas de áudio para a prévia. O vídeo '
+            'salvo não é afetado.');
   }
 
   void _forgetMonitor(Object lane) {
     if (identical(_monitorLane, lane)) _setMonitorLane(null);
+    _schedulePreview();
   }
 
   // ------------------------------------------------------------ video edits
@@ -320,6 +342,7 @@ class _EditorScreenState extends State<EditorScreen> {
             TimelineSelection(lane: file.mainVideo!, clip: insertable.clip);
       });
       _onScrub(at);
+      _schedulePreview();
       _showInfo('${p.basename(path)} entrou em ${formatTimelineTime(at)}');
     } catch (e) {
       _showError('Não foi possível ler "${p.basename(path)}"', e.toString());
@@ -372,6 +395,7 @@ class _EditorScreenState extends State<EditorScreen> {
     });
     emptied.forEach(_forgetMonitor);
     _onScrub(math.min(clip.timelineStart, _contentEnd));
+    _schedulePreview();
   }
 
   void _removeExternal(ExternalTrack track) {
@@ -383,14 +407,17 @@ class _EditorScreenState extends State<EditorScreen> {
   }
 
   List<MonitorOption> _monitorOptions() {
+    final file = _file;
+    if (file == null) return const [];
     return [
       const MonitorOption(lane: null, label: 'Áudio padrão'),
-      ...?_file?.tracks
-          .where((t) => t.type == TrackType.audio && !t.removed)
-          .map((t) => MonitorOption(lane: t, label: _laneName(t))),
-      ..._added
-          .where((t) => t.type == TrackType.audio)
-          .map((t) => MonitorOption(lane: t, label: t.title)),
+      for (final lane in audioLanesInOrder(file, _added))
+        MonitorOption(
+          lane: lane,
+          label: audioOutputOf(lane, file, _added).length > 1
+              ? '${_laneName(lane)} (mescla)'
+              : _laneName(lane),
+        ),
     ];
   }
 
@@ -442,6 +469,7 @@ class _EditorScreenState extends State<EditorScreen> {
           continue;
         }
         setState(() => _added.add(track));
+        _schedulePreview();
       } catch (e) {
         _showError('Não foi possível ler "${p.basename(path)}"', e.toString());
       }
@@ -471,6 +499,7 @@ class _EditorScreenState extends State<EditorScreen> {
           segments.isEmpty ? null : TimelineSelection(lane: lane);
     });
     if (segments.isEmpty) _onLaneEmptied(lane);
+    _schedulePreview();
   }
 
   String _laneName(Object lane) => switch (lane) {
@@ -653,16 +682,6 @@ class _EditorScreenState extends State<EditorScreen> {
   }
 
   // ------------------------------------------------------------------- ui
-
-  String? _insertedNotice() {
-    final clips = _clips;
-    final file = _file;
-    if (clips == null || file == null) return null;
-    final clip = clipAt(clips, _playhead);
-    if (clip == null || clip.path == file.path) return null;
-    return 'Vídeo inserido: ${p.basename(clip.path)}\n'
-        'A prévia mostra só o vídeo original; o inserido entra ao salvar.';
-  }
 
   void _showInfo(String message) {
     if (!mounted) return;
@@ -1016,7 +1035,7 @@ class _EditorScreenState extends State<EditorScreen> {
     setState(() {
       _selection = TimelineSelection(lane: sel.lane, segment: seg);
     });
-    _syncAudioDelay();
+    _schedulePreview();
     return true;
   }
 
@@ -1047,7 +1066,7 @@ class _EditorScreenState extends State<EditorScreen> {
 
   void _onTimelineModelChanged() {
     setState(() {});
-    _syncAudioDelay();
+    _schedulePreview();
   }
 
   void _toggleRemoved(MediaTrack track) {
@@ -1074,6 +1093,7 @@ class _EditorScreenState extends State<EditorScreen> {
       }
     });
     if (track.removed) _forgetMonitor(track);
+    _schedulePreview();
   }
 
   Widget _buildEditor(FluentThemeData theme) {
@@ -1099,7 +1119,6 @@ class _EditorScreenState extends State<EditorScreen> {
                         isPlaying: _isPlaying,
                         playhead: _playhead,
                         durationSeconds: _contentEnd,
-                        notice: _insertedNotice(),
                         onTogglePlay: _togglePlay,
                         onStepSeconds: _stepSeconds,
                         monitorOptions: _monitorOptions(),
@@ -1146,6 +1165,7 @@ class _EditorScreenState extends State<EditorScreen> {
                     onLaneEmptied: _onLaneEmptied,
                     onEditSubtitleOffset: _editSubtitleOffset,
                     onDeleteVideoClip: _deleteVideoClip,
+                    waveformOf: (source) => _audio?.waveform(source),
                   ),
                 ),
               ),

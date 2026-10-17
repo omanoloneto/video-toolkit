@@ -1,10 +1,14 @@
 import 'dart:math' as math;
+import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:fluent_ui/fluent_ui.dart';
+import 'package:flutter/gestures.dart';
 import 'package:path/path.dart' as p;
 
 import '../models/program.dart';
 import '../models/tracks.dart';
+import '../services/audio_cache.dart';
 import '../theme/app_themes.dart';
 import '../theme/theme_icons.dart';
 
@@ -72,7 +76,10 @@ class TimelinePanel extends StatefulWidget {
     required this.onLaneEmptied,
     required this.onEditSubtitleOffset,
     required this.onDeleteVideoClip,
+    this.waveformOf = _noWaveform,
   });
+
+  static Waveform? _noWaveform(AudioSource source) => null;
 
   final MediaFileInfo file;
   final List<ExternalTrack> added;
@@ -96,6 +103,9 @@ class TimelinePanel extends StatefulWidget {
 
   /// Remove o trecho do programa inteiro (quem chama confirma).
   final void Function(VideoClip clip) onDeleteVideoClip;
+
+  /// Forma de onda da origem de um trecho de áudio, quando já calculada.
+  final Waveform? Function(AudioSource source) waveformOf;
 
   @override
   State<TimelinePanel> createState() => TimelinePanelState();
@@ -122,6 +132,10 @@ class TimelinePanelState extends State<TimelinePanel> {
   // Active segment drag bookkeeping (single pointer on desktop).
   double _dragStartValue = 0;
   double _dragAccumPx = 0;
+
+  // Alça de vídeo: o programa é refeito a partir desta foto a cada movimento.
+  static const _edgeZone = 6.0;
+  ProgramSnapshot? _trimSnapshot;
 
   double get _playhead => widget.playhead;
 
@@ -772,64 +786,178 @@ class TimelinePanelState extends State<TimelinePanel> {
     final label =
         '${_sourceName(seg.source)}  ${formatTimelineTime(seg.timelineStart)}'
         ' – ${formatTimelineTime(seg.timelineEnd)}';
+    final waveform = widget.waveformOf(seg.source);
+    void select() => widget
+        .onSelectionChanged(TimelineSelection(lane: lane.ref, segment: seg));
 
-    return Positioned(
-      left: xOf(seg.timelineStart),
-      top: 3,
-      bottom: 3,
-      child: MouseRegion(
-        cursor: SystemMouseCursors.click,
-        child: GestureDetector(
-          onTap: () => widget.onSelectionChanged(
-              TimelineSelection(lane: lane.ref, segment: seg)),
-          onDoubleTap: () => _editSegment(lane.ref, seg),
-          onHorizontalDragStart: (_) {
-            widget.onSelectionChanged(
-                TimelineSelection(lane: lane.ref, segment: seg));
-            // Freeze the fit-derived scale: the drag itself can change the
-            // timeline span, and a scale that shifts mid-drag feeds back
-            // into the position math.
-            _pps ??= pps;
-            _dragStartValue = seg.timelineStart;
-            _dragAccumPx = 0;
-          },
-          onHorizontalDragUpdate: (details) {
-            _dragAccumPx += details.delta.dx;
-            var next =
-                math.max(0.0, _dragStartValue + _dragAccumPx / pps);
-            next = _snap(next, seg, segments, pps);
-            seg.timelineStart = next;
-            widget.onModelChanged();
-          },
-          onHorizontalDragEnd: (_) {
-            seg.timelineStart = (seg.timelineStart * 100).round() / 100;
-            widget.onModelChanged();
-          },
-          child: Container(
-            key: ValueKey<Object>(seg),
-            width: width,
-            padding: const EdgeInsets.symmetric(horizontal: 6),
-            decoration: BoxDecoration(
-              color: lane.color.withValues(alpha: selected ? 1.0 : 0.8),
-              borderRadius: BorderRadius.circular(_radius),
-              border: selected
-                  ? Border.all(color: Colors.white, width: 1.5)
-                  : null,
-            ),
-            alignment: Alignment.centerLeft,
-            child: width > 90
-                ? Text(
+    final body = MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: select,
+        onDoubleTap: () => _editSegment(lane.ref, seg),
+        onHorizontalDragStart: (_) {
+          select();
+          // Freeze the fit-derived scale: the drag itself can change the
+          // timeline span, and a scale that shifts mid-drag feeds back
+          // into the position math.
+          _pps ??= pps;
+          _dragStartValue = seg.timelineStart;
+          _dragAccumPx = 0;
+        },
+        onHorizontalDragUpdate: (details) {
+          _dragAccumPx += details.delta.dx;
+          var next = math.max(0.0, _dragStartValue + _dragAccumPx / pps);
+          next = _snap(next, seg, segments, pps);
+          seg.timelineStart = next;
+          widget.onModelChanged();
+        },
+        onHorizontalDragEnd: (_) {
+          seg.timelineStart = (seg.timelineStart * 100).round() / 100;
+          widget.onModelChanged();
+        },
+        child: Container(
+          decoration: BoxDecoration(
+            color: lane.color.withValues(alpha: selected ? 1.0 : 0.8),
+            borderRadius: BorderRadius.circular(_radius),
+            border: selected
+                ? Border.all(color: Colors.white, width: 1.5)
+                : null,
+          ),
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              if (waveform != null)
+                CustomPaint(
+                  painter: _WaveformPainter(
+                    waveform: waveform,
+                    sourceStart: seg.sourceStart,
+                    sourceEnd: seg.sourceEnd,
+                    pps: pps,
+                    color: Colors.white.withValues(alpha: 0.55),
+                  ),
+                ),
+              if (width > 90)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(6, 2, 6, 0),
+                  child: Text(
                     label,
                     style: theme.typography.caption?.copyWith(
-                        color: Colors.white, fontWeight: FontWeight.w600),
+                      color: Colors.white,
+                      fontWeight: FontWeight.w600,
+                      shadows: const [
+                        Shadow(blurRadius: 3, color: Color(0xAA000000)),
+                      ],
+                    ),
                     overflow: TextOverflow.ellipsis,
                     softWrap: false,
-                  )
-                : null,
+                  ),
+                ),
+            ],
           ),
         ),
       ),
     );
+
+    return Positioned(
+      key: ValueKey<Object>(seg),
+      left: xOf(seg.timelineStart),
+      top: 3,
+      bottom: 3,
+      child: _withEdgeHandles(
+        width: width,
+        selected: selected,
+        body: body,
+        onTap: select,
+        onStart: (left) {
+          select();
+          _pps ??= pps;
+          _dragAccumPx = 0;
+          _dragStartValue = left ? seg.timelineStart : seg.timelineEnd;
+        },
+        onUpdate: (left, dx) {
+          _dragAccumPx += dx;
+          final wanted = _snapEdge(_dragStartValue + _dragAccumPx / pps, pps,
+              ignoring: seg, pieces: segments);
+          if (left) {
+            trimSegmentStart(segments, seg, wanted);
+          } else {
+            trimSegmentEnd(segments, seg, wanted);
+          }
+          widget.onModelChanged();
+        },
+        onEnd: (_) => widget.onModelChanged(),
+      ),
+    );
+  }
+
+  /// As bordas de um trecho esticam ou encolhem ele; o meio continua com o
+  /// clique e o arrasto de sempre.
+  Widget _withEdgeHandles({
+    required double width,
+    required bool selected,
+    required Widget body,
+    required VoidCallback onTap,
+    required void Function(bool left) onStart,
+    required void Function(bool left, double dx) onUpdate,
+    required void Function(bool left) onEnd,
+  }) {
+    final zone = math.min(_edgeZone, width / 3);
+    Widget handle(bool left) => Positioned(
+          key: ValueKey(left ? 'trim-start' : 'trim-end'),
+          left: left ? 0 : null,
+          right: left ? null : 0,
+          top: 0,
+          bottom: 0,
+          width: zone,
+          child: _EdgeHandle(
+            left: left,
+            highlighted: selected,
+            onTap: onTap,
+            onStart: () => onStart(left),
+            onUpdate: (dx) => onUpdate(left, dx),
+            onEnd: () => onEnd(left),
+          ),
+        );
+    return SizedBox(
+      width: width,
+      child: Stack(
+        children: [
+          Positioned.fill(child: body),
+          handle(true),
+          handle(false),
+        ],
+      ),
+    );
+  }
+
+  /// Encosta a borda arrastada no zero, no cursor, nas bordas dos vizinhos e
+  /// nos cortes do vídeo quando passa perto.
+  double _snapEdge(double candidate, double pps,
+      {required Object ignoring,
+      Iterable<TimelinePiece> pieces = const [],
+      bool videoCuts = true}) {
+    final targets = <double>[
+      0,
+      _playhead,
+      for (final piece in pieces)
+        if (!identical(piece, ignoring)) ...[
+          piece.timelineStart,
+          piece.timelineEnd,
+        ],
+      if (videoCuts)
+        for (final clip in widget.file.mainVideo?.clips ?? const <VideoClip>[])
+          ...[clip.timelineStart, clip.timelineEnd],
+    ];
+    var snapped = candidate;
+    var distance = _snapPixels / pps;
+    for (final target in targets) {
+      final d = (candidate - target).abs();
+      if (d < distance) {
+        snapped = target;
+        distance = d;
+      }
+    }
+    return snapped;
   }
 
   /// Snaps a candidate timelineStart to 0, the playhead, or neighbouring
@@ -864,39 +992,79 @@ class TimelinePanelState extends State<TimelinePanel> {
         ? p.basenameWithoutExtension(clip.path)
         : 'Original  ${formatTimelineTime(clip.sourceStart)} – '
             '${formatTimelineTime(clip.sourceEnd)}';
+    void select() =>
+        widget.onSelectionChanged(TimelineSelection(lane: lane.ref, clip: clip));
+
+    final body = MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: select,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 6),
+          decoration: BoxDecoration(
+            color: (inserted ? const Color(0xFF7B4FB8) : lane.color)
+                .withValues(alpha: selected ? 1.0 : 0.85),
+            borderRadius: BorderRadius.circular(_radius),
+            border:
+                selected ? Border.all(color: Colors.white, width: 1.5) : null,
+          ),
+          alignment: Alignment.centerLeft,
+          child: width > 90
+              ? Text(
+                  label,
+                  style: theme.typography.caption?.copyWith(
+                      color: Colors.white, fontWeight: FontWeight.w600),
+                  overflow: TextOverflow.ellipsis,
+                  softWrap: false,
+                )
+              : null,
+        ),
+      ),
+    );
+
+    // vídeo é contínuo: a alça corta ou devolve material e tudo que vem
+    // depois (áudio e legenda junto) anda
     return Positioned(
+      key: ValueKey<Object>(clip),
       left: xOf(clip.timelineStart),
       top: 3,
       bottom: 3,
-      child: MouseRegion(
-        cursor: SystemMouseCursors.click,
-        child: GestureDetector(
-          onTap: () => widget.onSelectionChanged(
-              TimelineSelection(lane: lane.ref, clip: clip)),
-          child: Container(
-            key: ValueKey<Object>(clip),
-            width: width,
-            padding: const EdgeInsets.symmetric(horizontal: 6),
-            decoration: BoxDecoration(
-              color: (inserted ? const Color(0xFF7B4FB8) : lane.color)
-                  .withValues(alpha: selected ? 1.0 : 0.85),
-              borderRadius: BorderRadius.circular(_radius),
-              border: selected
-                  ? Border.all(color: Colors.white, width: 1.5)
-                  : null,
-            ),
-            alignment: Alignment.centerLeft,
-            child: width > 90
-                ? Text(
-                    label,
-                    style: theme.typography.caption?.copyWith(
-                        color: Colors.white, fontWeight: FontWeight.w600),
-                    overflow: TextOverflow.ellipsis,
-                    softWrap: false,
-                  )
-                : null,
-          ),
-        ),
+      child: _withEdgeHandles(
+        width: width,
+        selected: selected,
+        body: body,
+        onTap: select,
+        onStart: (left) {
+          select();
+          _pps ??= pps;
+          _dragAccumPx = 0;
+          _dragStartValue = clip.timelineEnd;
+          _trimSnapshot = ProgramSnapshot.take(widget.file, widget.added);
+        },
+        onUpdate: (left, dx) {
+          final snapshot = _trimSnapshot;
+          if (snapshot == null) return;
+          _dragAccumPx += dx;
+          snapshot.restore();
+          final edit = ProgramEdit(widget.file, widget.added);
+          if (left) {
+            edit.trimClipStart(clip, _dragAccumPx / pps);
+          } else {
+            final end = _snapEdge(_dragStartValue + _dragAccumPx / pps, pps,
+                ignoring: clip, videoCuts: false);
+            edit.trimClipEnd(clip, end - _dragStartValue);
+          }
+          widget.onModelChanged();
+        },
+        onEnd: (_) {
+          if (_trimSnapshot == null) return;
+          _trimSnapshot = null;
+          final edit = ProgramEdit(widget.file, widget.added);
+          for (final lane in edit.emptiedLanes()) {
+            widget.onLaneEmptied(lane);
+          }
+          widget.onModelChanged();
+        },
       ),
     );
   }
@@ -983,6 +1151,137 @@ class TimelinePanelState extends State<TimelinePanel> {
     if (ref is ExternalTrack) ref.offsetSeconds = value;
     widget.onModelChanged();
   }
+}
+
+/// Alça na borda de um trecho: o cursor vira seta dupla e arrastar estica ou
+/// encolhe.
+class _EdgeHandle extends StatefulWidget {
+  const _EdgeHandle({
+    required this.left,
+    required this.highlighted,
+    required this.onTap,
+    required this.onStart,
+    required this.onUpdate,
+    required this.onEnd,
+  });
+
+  final bool left;
+  final bool highlighted;
+  final VoidCallback onTap;
+  final VoidCallback onStart;
+  final ValueChanged<double> onUpdate;
+  final VoidCallback onEnd;
+
+  @override
+  State<_EdgeHandle> createState() => _EdgeHandleState();
+}
+
+class _EdgeHandleState extends State<_EdgeHandle> {
+  bool _hovered = false;
+  bool _dragging = false;
+
+  void _finish() {
+    if (!_dragging) return;
+    setState(() => _dragging = false);
+    widget.onEnd();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final alpha = _hovered || _dragging
+        ? 0.95
+        : widget.highlighted
+            ? 0.6
+            : 0.0;
+    return MouseRegion(
+      cursor: SystemMouseCursors.resizeLeftRight,
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        dragStartBehavior: DragStartBehavior.down,
+        onTap: widget.onTap,
+        onHorizontalDragStart: (_) {
+          setState(() => _dragging = true);
+          widget.onStart();
+        },
+        onHorizontalDragUpdate: (details) => widget.onUpdate(details.delta.dx),
+        onHorizontalDragEnd: (_) => _finish(),
+        onHorizontalDragCancel: _finish,
+        child: Align(
+          alignment:
+              widget.left ? Alignment.centerLeft : Alignment.centerRight,
+          child: Container(
+            width: 3,
+            margin: const EdgeInsets.symmetric(vertical: 5),
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: alpha),
+              borderRadius: BorderRadius.circular(1.5),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Forma de onda do pedaço [sourceStart, sourceEnd) da origem: uma barra por
+/// coluna de pixels, só na parte visível.
+class _WaveformPainter extends CustomPainter {
+  _WaveformPainter({
+    required this.waveform,
+    required this.sourceStart,
+    required this.sourceEnd,
+    required this.pps,
+    required this.color,
+  });
+
+  final Waveform waveform;
+  final double sourceStart;
+  final double sourceEnd;
+  final double pps;
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final visible = canvas.getLocalClipBounds();
+    final from = math.max(0, visible.left.floor());
+    final to = math.min(size.width, visible.right).ceil();
+    final loudest = waveform.maxPeak;
+    if (to <= from || loudest <= 0) return;
+    final mid = size.height / 2;
+    final half = mid - 2;
+    final points = Float32List((to - from) * 4);
+    var n = 0;
+    for (var x = from; x < to; x++) {
+      final start = sourceStart + x / pps;
+      if (start >= sourceEnd) break;
+      final end = math.min(sourceEnd, start + 1 / pps);
+      // raiz: a fala baixa aparece sem a alta estourar a faixa
+      final level = math.sqrt(waveform.peakBetween(start, end) / loudest);
+      final h = math.max(0.5, level * half);
+      points[n++] = x + 0.5;
+      points[n++] = mid - h;
+      points[n++] = x + 0.5;
+      points[n++] = mid + h;
+    }
+    if (n == 0) return;
+    canvas.drawRawPoints(
+      ui.PointMode.lines,
+      Float32List.sublistView(points, 0, n),
+      Paint()
+        ..color = color
+        ..strokeWidth = 1,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_WaveformPainter old) =>
+      !identical(old.waveform, waveform) ||
+      old.sourceStart != sourceStart ||
+      old.sourceEnd != sourceEnd ||
+      old.pps != pps ||
+      old.color != color;
 }
 
 class _Lane {
