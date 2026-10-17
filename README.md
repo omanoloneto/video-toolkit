@@ -33,7 +33,10 @@ copied bit-for-bit.
   rename tracks; export any audio track losslessly.
 - **Timeline editing** — split audio tracks into segments, delete pieces,
   drag them along a zoomable timeline with playhead snapping, or type exact
-  times (`90`, `1:30`, `1:02:03.5`).
+  times (`90`, `1:30`, `1:02:03.5`). Drag the edge of any piece to shrink or
+  stretch it for fine adjustments: audio stops where its source ends or
+  where the neighbouring piece begins, and edges snap to the playhead and to
+  video cuts. Audio lanes show the waveform of their source.
 - **Merge on save** — tracks that were cut apart are automatically
   mixed into a single output track at their timeline positions (e.g. the
   first 3 minutes of track 1 followed by the rest of track 2). Untouched or
@@ -45,17 +48,21 @@ copied bit-for-bit.
   piece: its audio and subtitles go with it and everything after moves back,
   so nothing falls out of sync. Insert another video file at the playhead
   (opening, ending...): it is fitted into the original frame, its sound fills
-  the gap in every audio track and the rest moves forward. Cuts are
-  frame-exact, so an edited video is always re-encoded on save.
+  the gap in every audio track and the rest moves forward. Dragging the edge
+  of a video piece trims or brings back footage the same way, with the
+  audio and subtitles of that stretch. Cuts are frame-exact, so an edited
+  video is always re-encoded on save.
 - **Compact formats** — on save, keep the original picture or re-encode to
   **AV1** (SVT-AV1, about half the size at the same quality — VMAF ≈ 96.5 on
   1080p anime) or **H.265** (plays on more devices, much slower to encode).
   Lossless audio (FLAC, PCM...) becomes AAC 256 kb/s when compacting.
-- **Built-in preview** — video playback powered by
-  [media_kit](https://pub.dev/packages/media_kit)/libmpv (plays MKV
-  natively), synced with the timeline playhead. Choose which audio track to
-  monitor — including external files — with segment shifts applied live,
-  which makes dialogue syncing fast.
+- **Built-in preview of the edit** — playback powered by
+  [media_kit](https://pub.dev/packages/media_kit)/libmpv plays the edited
+  program, not the original file: cuts, inserted videos, trimmed or moved
+  audio, silent gaps and merged tracks sound the way they will be saved. The
+  program is assembled as an mpv EDL from single-stream copies of the audio
+  tracks, rebuilt a moment after each edit. Choose which track to monitor —
+  including external files; a merged track plays the whole merge.
 - **Lossless by default** — video is always stream-copied. Untouched audio
   is copied too (pure delays use `-itsoffset`, head trims use `-ss`); only
   edited audio lanes are re-encoded (AAC 256k) through an ffmpeg filter
@@ -178,6 +185,9 @@ dart run tool/e2e.dart  # end-to-end against a real ffmpeg: generates media,
                         # saves through the app's pipeline and verifies the
                         # output content (stream counts, durations, which
                         # audio plays before/after a cut)
+flutter test integration_test -d macos  # runs the real app: trims audio and
+                        # video by their edges and checks what libmpv loads
+                        # and plays
 ```
 
 ## Project layout
@@ -185,7 +195,10 @@ dart run tool/e2e.dart  # end-to-end against a real ffmpeg: generates media,
 ```
 lib/
   models/tracks.dart          # tracks, audio segments, split/merge rules
+  models/program.dart         # ripple cuts/inserts, edge trims, snapshots
   services/ffmpeg_service.dart# probing + ffmpeg command construction
+  services/audio_cache.dart   # per-track audio copies, waveforms, silence
+  services/preview_plan.dart  # what the preview plays (mpv EDL)
   screens/editor_screen.dart  # app shell, menu bar, playback state
   widgets/timeline_panel.dart # timeline: lanes, clips, ruler, playhead
   widgets/preview_panel.dart  # video preview + audio monitoring
@@ -193,6 +206,7 @@ lib/
   theme/app_themes.dart       # the 10 theme definitions
   theme/theme_icons.dart      # Fluent / Cupertino / Material icon sets
 tool/e2e.dart                 # real-ffmpeg end-to-end checks
+integration_test/             # the real app driving libmpv
 assets/icon/                  # icon source art
 ```
 
