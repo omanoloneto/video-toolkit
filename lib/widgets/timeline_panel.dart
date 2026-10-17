@@ -117,6 +117,7 @@ class TimelinePanelState extends State<TimelinePanel> {
   static const _laneHeight = 40.0;
   static const _laneGap = 4.0;
   static const _snapPixels = 8.0;
+  static const _edgeZone = 6.0;
 
   double? _pps; // pixels per second; null until fitted to the viewport
   final _scrollController = ScrollController();
@@ -132,10 +133,6 @@ class TimelinePanelState extends State<TimelinePanel> {
   // Active segment drag bookkeeping (single pointer on desktop).
   double _dragStartValue = 0;
   double _dragAccumPx = 0;
-
-  // Alça de vídeo: o programa é refeito a partir desta foto a cada movimento.
-  static const _edgeZone = 6.0;
-  ProgramSnapshot? _trimSnapshot;
 
   double get _playhead => widget.playhead;
 
@@ -742,8 +739,9 @@ class TimelinePanelState extends State<TimelinePanel> {
     ];
 
     if (lane.clips != null) {
-      for (final clip in lane.clips!) {
-        children.add(_buildVideoClip(theme, lane, clip, xOf, pps));
+      final clips = lane.clips!;
+      for (final clip in clips) {
+        children.add(_buildVideoClip(theme, lane, clip, clips, xOf, pps));
       }
     } else if (lane.segments != null) {
       final segments = lane.segments!;
@@ -864,42 +862,27 @@ class TimelinePanelState extends State<TimelinePanel> {
       top: 3,
       bottom: 3,
       child: _withEdgeHandles(
+        piece: seg,
+        lane: segments,
         width: width,
+        pps: pps,
         selected: selected,
         body: body,
-        onTap: select,
-        onStart: (left) {
-          select();
-          _pps ??= pps;
-          _dragAccumPx = 0;
-          _dragStartValue = left ? seg.timelineStart : seg.timelineEnd;
-        },
-        onUpdate: (left, dx) {
-          _dragAccumPx += dx;
-          final wanted = _snapEdge(_dragStartValue + _dragAccumPx / pps, pps,
-              ignoring: seg, pieces: segments);
-          if (left) {
-            trimSegmentStart(segments, seg, wanted);
-          } else {
-            trimSegmentEnd(segments, seg, wanted);
-          }
-          widget.onModelChanged();
-        },
-        onEnd: (_) => widget.onModelChanged(),
+        select: select,
       ),
     );
   }
 
-  /// As bordas de um trecho esticam ou encolhem ele; o meio continua com o
-  /// clique e o arrasto de sempre.
-  Widget _withEdgeHandles({
+  /// As bordas de um trecho esticam ou encolhem só ele, sem passar dos
+  /// vizinhos de [lane]; o meio continua com o clique e o arrasto de sempre.
+  Widget _withEdgeHandles<T extends TimelinePiece>({
+    required T piece,
+    required List<T> lane,
     required double width,
+    required double pps,
     required bool selected,
     required Widget body,
-    required VoidCallback onTap,
-    required void Function(bool left) onStart,
-    required void Function(bool left, double dx) onUpdate,
-    required void Function(bool left) onEnd,
+    required VoidCallback select,
   }) {
     final zone = math.min(_edgeZone, width / 3);
     Widget handle(bool left) => Positioned(
@@ -912,10 +895,25 @@ class TimelinePanelState extends State<TimelinePanel> {
           child: _EdgeHandle(
             left: left,
             highlighted: selected,
-            onTap: onTap,
-            onStart: () => onStart(left),
-            onUpdate: (dx) => onUpdate(left, dx),
-            onEnd: () => onEnd(left),
+            onTap: select,
+            onStart: () {
+              select();
+              _pps ??= pps;
+              _dragAccumPx = 0;
+              _dragStartValue = left ? piece.timelineStart : piece.timelineEnd;
+            },
+            onUpdate: (dx) {
+              _dragAccumPx += dx;
+              final wanted = _snapEdge(
+                  _dragStartValue + _dragAccumPx / pps, pps, piece, lane);
+              if (left) {
+                trimSegmentStart(lane, piece, wanted);
+              } else {
+                trimSegmentEnd(lane, piece, wanted);
+              }
+              widget.onModelChanged();
+            },
+            onEnd: () => widget.onModelChanged(),
           ),
         );
     return SizedBox(
@@ -930,31 +928,38 @@ class TimelinePanelState extends State<TimelinePanel> {
     );
   }
 
-  /// Encosta a borda arrastada no zero, no cursor, nas bordas dos vizinhos e
-  /// nos cortes do vídeo quando passa perto.
-  double _snapEdge(double candidate, double pps,
-      {required Object ignoring,
-      Iterable<TimelinePiece> pieces = const [],
-      bool videoCuts = true}) {
+  /// Encosta a borda arrastada no zero, no cursor e nas bordas dos outros
+  /// trechos de [lane] quando passa perto; o áudio também nos cortes do vídeo
+  /// e o vídeo nos cortes de todo áudio. Com o trecho inteiro arrastado
+  /// ([length] é a duração dele), vale a borda que chegar mais perto.
+  double _snapEdge(double candidate, double pps, TimelinePiece dragged,
+      List<TimelinePiece> lane,
+      {double length = 0}) {
+    final across = dragged is VideoClip
+        ? [
+            for (final track in widget.file.tracks)
+              if (!track.removed) ...track.segments,
+            for (final track in widget.added) ...track.segments,
+          ]
+        : widget.file.mainVideo?.clips ?? const <VideoClip>[];
     final targets = <double>[
       0,
       _playhead,
-      for (final piece in pieces)
-        if (!identical(piece, ignoring)) ...[
+      for (final piece in [...lane, ...across])
+        if (!identical(piece, dragged)) ...[
           piece.timelineStart,
           piece.timelineEnd,
         ],
-      if (videoCuts)
-        for (final clip in widget.file.mainVideo?.clips ?? const <VideoClip>[])
-          ...[clip.timelineStart, clip.timelineEnd],
     ];
     var snapped = candidate;
     var distance = _snapPixels / pps;
     for (final target in targets) {
-      final d = (candidate - target).abs();
-      if (d < distance) {
-        snapped = target;
-        distance = d;
+      for (final edge in [0.0, length]) {
+        final d = (candidate + edge - target).abs();
+        if (d < distance) {
+          snapped = target - edge;
+          distance = d;
+        }
       }
     }
     return snapped;
@@ -984,7 +989,7 @@ class TimelinePanelState extends State<TimelinePanel> {
   }
 
   Widget _buildVideoClip(FluentThemeData theme, _Lane lane, VideoClip clip,
-      double Function(double) xOf, double pps) {
+      List<VideoClip> clips, double Function(double) xOf, double pps) {
     final selected = identical(widget.selection?.clip, clip);
     final inserted = clip.path != widget.file.path;
     final width = math.max(clip.duration * pps, 12.0);
@@ -995,10 +1000,26 @@ class TimelinePanelState extends State<TimelinePanel> {
     void select() =>
         widget.onSelectionChanged(TimelineSelection(lane: lane.ref, clip: clip));
 
+    // vídeo não puxa o áudio: borda e arrasto mexem só neste trecho, e o vão
+    // que sobra entre os trechos fica preto
     final body = MouseRegion(
       cursor: SystemMouseCursors.click,
       child: GestureDetector(
         onTap: select,
+        onHorizontalDragStart: (_) {
+          select();
+          _pps ??= pps;
+          _dragStartValue = clip.timelineStart;
+          _dragAccumPx = 0;
+        },
+        onHorizontalDragUpdate: (details) {
+          _dragAccumPx += details.delta.dx;
+          final wanted = _snapEdge(
+              _dragStartValue + _dragAccumPx / pps, pps, clip, clips,
+              length: clip.duration);
+          clip.timelineStart = clampMove(clips, clip, wanted);
+          widget.onModelChanged();
+        },
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 6),
           decoration: BoxDecoration(
@@ -1022,49 +1043,19 @@ class TimelinePanelState extends State<TimelinePanel> {
       ),
     );
 
-    // vídeo é contínuo: a alça corta ou devolve material e tudo que vem
-    // depois (áudio e legenda junto) anda
     return Positioned(
       key: ValueKey<Object>(clip),
       left: xOf(clip.timelineStart),
       top: 3,
       bottom: 3,
       child: _withEdgeHandles(
+        piece: clip,
+        lane: clips,
         width: width,
+        pps: pps,
         selected: selected,
         body: body,
-        onTap: select,
-        onStart: (left) {
-          select();
-          _pps ??= pps;
-          _dragAccumPx = 0;
-          _dragStartValue = clip.timelineEnd;
-          _trimSnapshot = ProgramSnapshot.take(widget.file, widget.added);
-        },
-        onUpdate: (left, dx) {
-          final snapshot = _trimSnapshot;
-          if (snapshot == null) return;
-          _dragAccumPx += dx;
-          snapshot.restore();
-          final edit = ProgramEdit(widget.file, widget.added);
-          if (left) {
-            edit.trimClipStart(clip, _dragAccumPx / pps);
-          } else {
-            final end = _snapEdge(_dragStartValue + _dragAccumPx / pps, pps,
-                ignoring: clip, videoCuts: false);
-            edit.trimClipEnd(clip, end - _dragStartValue);
-          }
-          widget.onModelChanged();
-        },
-        onEnd: (_) {
-          if (_trimSnapshot == null) return;
-          _trimSnapshot = null;
-          final edit = ProgramEdit(widget.file, widget.added);
-          for (final lane in edit.emptiedLanes()) {
-            widget.onLaneEmptied(lane);
-          }
-          widget.onModelChanged();
-        },
+        select: select,
       ),
     );
   }

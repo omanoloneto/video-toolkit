@@ -36,7 +36,19 @@ MediaFileInfo _file(List<MediaTrack> tracks) => MediaFileInfo(
       tracks: tracks,
     );
 
-MediaTrack _video() => MediaTrack(
+VideoClip _clip(double start, double end, double at) => VideoClip(
+      path: kSource,
+      streamTypeIndex: 0,
+      width: 1280,
+      height: 720,
+      rate: '25',
+      sourceStart: start,
+      sourceEnd: end,
+      timelineStart: at,
+      sourceDuration: 100,
+    );
+
+MediaTrack _video([List<VideoClip>? clips]) => MediaTrack(
       streamIndex: 0,
       type: TrackType.video,
       typeIndex: 0,
@@ -44,17 +56,10 @@ MediaTrack _video() => MediaTrack(
       details: '',
       originalTitle: '',
       durationSeconds: 100,
-    )..clips.add(VideoClip(
-        path: kSource,
-        streamTypeIndex: 0,
-        width: 1280,
-        height: 720,
-        rate: '25',
-        sourceStart: 0,
-        sourceEnd: 100,
-        timelineStart: 0,
-        sourceDuration: 100,
-      ));
+    )..clips.addAll(clips ?? [_clip(0, 100, 0)]);
+
+(double, double, double) _range(TimelinePiece p) =>
+    (p.sourceStart, p.sourceEnd, p.timelineStart);
 
 Widget _wrap({
   required MediaFileInfo file,
@@ -249,13 +254,14 @@ void main() {
     expect(seg.sourceEnd, closeTo(100, 1e-9));
   });
 
-  testWidgets('dragging a video edge trims the program and the audio follows',
+  testWidgets('dragging the left edge of a video clip leaves the audio alone',
       (tester) async {
     await useDesktopSurface(tester);
     final video = _video();
     final audio = _audio(0);
     final file = _file([video, audio]);
     final clip = video.clips.single;
+    final seg = audio.segments.single;
 
     await tester.pumpWidget(_wrap(
       file: file,
@@ -268,10 +274,111 @@ void main() {
 
     expect(video.clips.single, same(clip));
     expect(clip.sourceStart, greaterThan(0));
-    expect(clip.timelineStart, 0);
-    final seg = audio.segments.single;
-    expect(seg.sourceStart, closeTo(clip.sourceStart, 1e-6));
-    expect(seg.timelineStart, 0);
+    // o resto da imagem não sai do lugar: o começo vira vão
+    expect(clip.timelineStart, closeTo(clip.sourceStart, 1e-9));
+    expect(clip.timelineEnd, closeTo(100, 1e-9));
+    expect(audio.segments.single, same(seg));
+    expect(_range(seg), (0.0, 100.0, 0.0));
+  });
+
+  testWidgets('dragging the right edge of a video clip leaves a gap at its '
+      'tail', (tester) async {
+    await useDesktopSurface(tester);
+    final video = _video([_clip(0, 50, 0), _clip(50, 100, 50)]);
+    final audio = _audio(0);
+    final file = _file([video, audio]);
+    final [first, second] = video.clips;
+
+    await tester.pumpWidget(_wrap(
+      file: file,
+      selection: null,
+      onSelectionChanged: (_) {},
+    ));
+
+    await tester.drag(handle(first, 'trim-end'), const Offset(-100, 0));
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(video.clips, [same(first), same(second)]);
+    expect(first.timelineStart, 0);
+    expect(first.timelineEnd, lessThan(50));
+    expect(_range(second), (50.0, 100.0, 50.0));
+    expect(_range(audio.segments.single), (0.0, 100.0, 0.0));
+  });
+
+  testWidgets('stretching a video clip stops at its neighbour and at the end '
+      'of its source', (tester) async {
+    await useDesktopSurface(tester);
+    final video = _video([_clip(0, 40, 0), _clip(60, 80, 60)]);
+    final file = _file([video, _audio(0)]);
+    final [first, second] = video.clips;
+
+    await tester.pumpWidget(_wrap(
+      file: file,
+      selection: null,
+      onSelectionChanged: (_) {},
+    ));
+
+    await tester.drag(handle(first, 'trim-end'), const Offset(600, 0));
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(first.timelineEnd, closeTo(60, 1e-9));
+    expect(_range(second), (60.0, 80.0, 60.0));
+
+    await tester.drag(handle(second, 'trim-end'), const Offset(600, 0));
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(second.sourceEnd, 100);
+    expect(second.timelineStart, 60);
+  });
+
+  testWidgets('a video edge snaps to the cuts of the audio', (tester) async {
+    await useDesktopSurface(tester);
+    final video = _video();
+    final audio = _audio(0);
+    splitSegment(audio.segments, audio.segments.single, 30);
+    final file = _file([video, audio]);
+    final clip = video.clips.single;
+
+    await tester.pumpWidget(_wrap(
+      file: file,
+      selection: null,
+      onSelectionChanged: (_) {},
+    ));
+
+    final pps =
+        tester.getSize(find.byKey(ValueKey<Object>(clip))).width / 100;
+    await tester.drag(handle(clip, 'trim-start'), Offset(30 * pps + 4, 0));
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(_range(clip), (30.0, 100.0, 30.0));
+  });
+
+  testWidgets('dragging a video clip moves it but not into its neighbour',
+      (tester) async {
+    await useDesktopSurface(tester);
+    final video = _video([_clip(0, 40, 0), _clip(60, 100, 60)]);
+    final audio = _audio(0);
+    final file = _file([video, audio]);
+    final [first, second] = video.clips;
+    TimelineSelection? selection;
+
+    await tester.pumpWidget(_wrap(
+      file: file,
+      selection: null,
+      onSelectionChanged: (s) => selection = s,
+    ));
+
+    await tester.drag(
+        find.byKey(ValueKey<Object>(second)), const Offset(-100, 0));
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(selection?.clip, same(second));
+    expect(second.timelineStart, inExclusiveRange(40, 60));
+    expect((second.sourceStart, second.sourceEnd), (60.0, 100.0));
+
+    await tester.drag(
+        find.byKey(ValueKey<Object>(second)), const Offset(-1000, 0));
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(second.timelineStart, first.timelineEnd);
+    expect(_range(first), (0.0, 40.0, 0.0));
+    expect(_range(audio.segments.single), (0.0, 100.0, 0.0));
   });
 
   testWidgets('audio segments draw the waveform of their source',
