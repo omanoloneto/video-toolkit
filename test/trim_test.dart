@@ -5,7 +5,9 @@ import 'package:video_toolkit/models/tracks.dart';
 const kSource = '/tmp/episode.mkv';
 const kSong = '/tmp/song.flac';
 
-VideoClip _clip(double start, double end, double at) => VideoClip(
+VideoClip _clip(double start, double end, double at,
+        {double sourceDuration = 600}) =>
+    VideoClip(
       path: kSource,
       streamTypeIndex: 0,
       width: 1432,
@@ -14,7 +16,7 @@ VideoClip _clip(double start, double end, double at) => VideoClip(
       sourceStart: start,
       sourceEnd: end,
       timelineStart: at,
-      sourceDuration: 600,
+      sourceDuration: sourceDuration,
     );
 
 AudioSegment _segment(double start, double end, double at) => AudioSegment(
@@ -104,6 +106,43 @@ List<List<(double, double, double)>> _timeline(MediaFileInfo file,
         [List<ExternalTrack> added = const []]) =>
     [for (final lane in _lanes(file, added)) _ranges(lane)];
 
+// instantes como 130.3 não são exatos em binário: compara no microssegundo
+double _micro(double t) => t.isFinite ? (t * 1e6).roundToDouble() / 1e6 : t;
+
+List<(double, double, double)> _rounded(Iterable<TimelinePiece> pieces) => [
+      for (final p in pieces)
+        (_micro(p.sourceStart), _micro(p.sourceEnd), _micro(p.timelineStart)),
+    ];
+
+List<List<(double, double, double)>> _roundedTimeline(MediaFileInfo file) =>
+    [for (final lane in _lanes(file, const [])) _rounded(lane)];
+
+// faixa que ninguém mexeu à mão repete os trechos do vídeo
+void _expectLanesFollowVideo(MediaFileInfo file, String reason) {
+  final video = _rounded(file.mainVideo!.clips);
+  for (final audio in file.byType(TrackType.audio)) {
+    expect(_rounded(audio.segments), video, reason: reason);
+  }
+  final subtitle = _rounded(file.byType(TrackType.subtitle).single.pieces);
+  expect([for (final (start, _, at) in subtitle) (start, at)],
+      [for (final (start, _, at) in video) (start, at)],
+      reason: reason);
+}
+
+// remove como a tela: divide nas duas pontas e corta o trecho do meio
+MediaFileInfo _removedWithTheBlade(List<(double, double)> ranges) {
+  final file = _program();
+  final clips = file.mainVideo!.clips;
+  for (final (from, to) in ranges) {
+    splitSegment(clips, clipAt(clips, from)!, from);
+    splitSegment(clips, clipAt(clips, to)!, to);
+    final removed =
+        clips.firstWhere((c) => (c.timelineStart - from).abs() < 1e-6);
+    ProgramEdit(file, []).cut(removed.timelineStart, removed.timelineEnd);
+  }
+  return file;
+}
+
 void main() {
   group('audio segment edges', () {
     test('the left edge stops where the source begins', () {
@@ -123,6 +162,16 @@ void main() {
       final segment = _segment(100, 500, 50);
       trimSegmentEnd([segment], segment, 700);
       expect(_ranges([segment]), [(100.0, 600.0, 50.0)]);
+    });
+
+    test('edges at inexact times never pass the source limits', () {
+      final head = _segment(0.1, 100, 1.6);
+      trimSegmentStart([head], head, 0);
+      expect(head.sourceStart, 0);
+
+      final tail = _segment(0.3, 100, 0.2);
+      trimSegmentEnd([tail], tail, 1000);
+      expect(tail.sourceEnd, 600);
     });
 
     test('edges stop at the closest neighbour and leave it alone', () {
@@ -271,6 +320,95 @@ void main() {
         ProgramEdit(cutLess, []).cut(from, to - stretch);
         expect(_timeline(edited), _timeline(cutLess), reason: 'cut $from-$to');
       }
+    });
+
+    test('stretching the tail over cuts at inexact times restores it once',
+        () {
+      final edited = _program();
+      final edit = ProgramEdit(edited, [])
+        ..cut(10.1, 37.2)
+        ..cut(130.3, 150.8);
+
+      expect(edit.trimClipEnd(edited.mainVideo!.clips[1], 5), 5);
+
+      final cutLess = _program();
+      ProgramEdit(cutLess, [])
+        ..cut(10.1, 37.2)
+        ..cut(135.3, 150.8);
+      expect(_roundedTimeline(edited), _roundedTimeline(cutLess));
+    });
+
+    test('stretching the head over cuts at inexact times restores it once',
+        () {
+      final edited = _program();
+      final edit = ProgramEdit(edited, [])
+        ..cut(10.1, 37.2)
+        ..cut(130.3, 150.8);
+
+      expect(edit.trimClipStart(edited.mainVideo!.clips[2], -5), -5);
+
+      final cutLess = _program();
+      ProgramEdit(cutLess, [])
+        ..cut(10.1, 37.2)
+        ..cut(130.3, 145.8);
+      expect(_roundedTimeline(edited), _roundedTimeline(cutLess));
+    });
+
+    test('dragging edges after blade cuts at inexact times keeps lanes in sync',
+        () {
+      for (final removed in [
+        [(12.345, 47.891), (101.37, 133.08), (220.6, 260.15)],
+        [(40.6, 305.0)],
+      ]) {
+        final file = _removedWithTheBlade(removed);
+        final clips = file.mainVideo!.clips;
+        final edit = ProgramEdit(file, []);
+        for (final (step, trim, wanted) in [
+          ('shrink head', () => edit.trimClipStart(clips[1], 1), 1.0),
+          ('stretch head', () => edit.trimClipStart(clips[1], -3), -3.0),
+          ('stretch tail', () => edit.trimClipEnd(clips[0], 2), 2.0),
+          ('shrink tail', () => edit.trimClipEnd(clips[0], -1), -1.0),
+        ]) {
+          final reason = '$step after removing $removed';
+          expect(trim(), wanted, reason: reason);
+          _expectLanesFollowVideo(file, reason);
+        }
+      }
+    });
+
+    test('a sliver left by a cut is not stretched over the restored audio',
+        () {
+      final file = _removedWithTheBlade([(26.7, 101.7)]);
+      final clips = file.mainVideo!.clips;
+      final edit = ProgramEdit(file, []);
+      splitSegment(clips, clips[1], 70.3);
+      edit.cut(clips[1].timelineStart, clips[1].timelineEnd);
+
+      expect(edit.trimClipEnd(clips[0], 2), 2);
+
+      for (final audio in file.byType(TrackType.audio)) {
+        expect(_rounded(audio.segments.where((s) => s.duration > 1e-6)),
+            _rounded(clips));
+      }
+    });
+
+    test('the tail never passes the end of the source', () {
+      final clip = _clip(0, 0.7, 0, sourceDuration: 3.4);
+      final file = _file([_video()..clips[0] = clip]);
+
+      expect(ProgramEdit(file, []).trimClipEnd(clip, 10), closeTo(2.7, 1e-9));
+      expect(clip.sourceEnd, 3.4);
+    });
+
+    test('a clip at the minimum length does not shrink by a rounding error',
+        () {
+      final file = _splitAt(300);
+      final first = file.mainVideo!.clips.first;
+      final edit = ProgramEdit(file, [])..trimClipStart(first, 1000);
+      final timeline = _timeline(file);
+
+      expect(edit.trimClipEnd(first, -1), 0);
+      expect(_timeline(file), timeline);
     });
 
     test('a trim returns how far the edge could actually go', () {

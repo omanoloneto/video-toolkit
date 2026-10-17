@@ -3,8 +3,10 @@ import 'dart:math' as math;
 import 'tracks.dart';
 
 /// Tira [from, to) da linha do tempo: o que vinha depois anda pra trás.
+/// Sobra menor que [tolerance] nas pontas do corte sai junto, sem virar lasca.
 void rippleDelete<T extends TimelinePiece>(
-    List<T> pieces, double from, double to) {
+    List<T> pieces, double from, double to,
+    {double tolerance = 0}) {
   final length = to - from;
   if (length <= 0) return;
   final kept = <T>[];
@@ -16,14 +18,14 @@ void rippleDelete<T extends TimelinePiece>(
       piece.timelineStart = start - length;
       kept.add(piece);
     } else {
-      if (start < from) {
+      if (start < from - tolerance) {
         kept.add(piece.slice(
           sourceStart: piece.sourceStart,
           sourceEnd: piece.sourceStart + (from - start),
           timelineStart: start,
         ) as T);
       }
-      if (end > to) {
+      if (end > to + tolerance) {
         kept.add(piece.slice(
           sourceStart: piece.sourceStart + (to - start),
           sourceEnd: piece.sourceEnd,
@@ -38,15 +40,17 @@ void rippleDelete<T extends TimelinePiece>(
 }
 
 /// Abre um vão de [length] em [at]: o que vinha depois anda pra frente.
+/// Pedaço que começa ou termina a menos de [tolerance] de [at] não é dividido.
 void rippleInsert<T extends TimelinePiece>(
-    List<T> pieces, double at, double length) {
+    List<T> pieces, double at, double length,
+    {double tolerance = 0}) {
   if (length <= 0) return;
   final result = <T>[];
   for (final piece in pieces) {
     final start = piece.timelineStart, end = piece.timelineEnd;
-    if (end <= at) {
+    if (end <= at + tolerance) {
       result.add(piece);
-    } else if (start >= at) {
+    } else if (start >= at - tolerance) {
       piece.timelineStart = start + length;
       result.add(piece);
     } else {
@@ -114,6 +118,11 @@ bool programUntouched(MediaFileInfo file) {
 /// Menor trecho que arrastar uma borda deixa.
 const double kMinPieceDuration = 0.05;
 
+// cortes em instantes que o double não guarda exatos deixam as faixas a um
+// arredondamento da borda do vídeo: a menos disso é a mesma borda, e pedaço
+// mais curto que isso é lasca sem material
+const double _kRounding = 1e-6;
+
 /// Até onde a borda esquerda de [segment] vai quando arrastada pra [wanted]:
 /// não passa do começo da origem, do zero nem do fim do vizinho à esquerda,
 /// e o trecho não fica menor que [kMinPieceDuration].
@@ -122,7 +131,7 @@ double clampSegmentStart(
   var lower = math.max(0.0, segment.timelineStart - segment.sourceStart);
   for (final other in lane) {
     if (!identical(other, segment) &&
-        other.timelineEnd <= segment.timelineStart + 1e-6) {
+        other.timelineEnd <= segment.timelineStart + _kRounding) {
       lower = math.max(lower, other.timelineEnd);
     }
   }
@@ -139,7 +148,7 @@ double clampSegmentEnd(
       (segment.sourceDuration - segment.sourceStart);
   for (final other in lane) {
     if (!identical(other, segment) &&
-        other.timelineStart >= segment.timelineEnd - 1e-6) {
+        other.timelineStart >= segment.timelineEnd - _kRounding) {
       upper = math.min(upper, other.timelineStart);
     }
   }
@@ -158,15 +167,18 @@ void trimSegmentStart(
     List<AudioSegment> lane, AudioSegment segment, double wanted) {
   final start = clampSegmentStart(lane, segment, wanted);
   segment
-    ..sourceStart += start - segment.timelineStart
+    ..sourceStart = math.max(
+        0.0, segment.sourceStart + (start - segment.timelineStart))
     ..timelineStart = start;
 }
 
 /// Arrasta a borda direita de [segment] pra [wanted] (ver [clampSegmentEnd]).
 void trimSegmentEnd(
     List<AudioSegment> lane, AudioSegment segment, double wanted) {
-  segment.sourceEnd +=
-      clampSegmentEnd(lane, segment, wanted) - segment.timelineEnd;
+  segment.sourceEnd = math.min(
+      segment.sourceDuration,
+      segment.sourceEnd +
+          (clampSegmentEnd(lane, segment, wanted) - segment.timelineEnd));
 }
 
 /// Edições do programa: o vídeo é cortado ou ganha trecho e todas as outras
@@ -268,17 +280,22 @@ class ProgramEdit {
   void _cutLanes(double from, double to) {
     final end = _lanesCutEnd(to);
     _ripple(<T extends TimelinePiece>(List<T> pieces) {
-      if (pieces is! List<VideoClip>) rippleDelete(pieces, from, end);
+      if (pieces is! List<VideoClip>) {
+        rippleDelete(pieces, from, end, tolerance: _kRounding);
+      }
     });
   }
 
-  // esticar de volta sobre um corte devolve também o áudio e a legenda
+  // esticar de volta sobre um corte devolve também o áudio e a legenda; lasca
+  // sem material não tem o que devolver
   void _openLanes(
       double at, double length, void Function(TimelinePiece) bringBack) {
     _ripple(<T extends TimelinePiece>(List<T> pieces) {
       if (pieces is List<VideoClip>) return;
-      rippleInsert(pieces, at, length);
-      pieces.forEach(bringBack);
+      rippleInsert(pieces, at, length, tolerance: _kRounding);
+      for (final piece in pieces) {
+        if (piece.duration > _kRounding) bringBack(piece);
+      }
     });
   }
 
@@ -290,7 +307,11 @@ class ProgramEdit {
     final applied = _clampEdge(
         delta, -clip.sourceStart, clip.duration - kMinPieceDuration, 0);
     final clips = file.mainVideo?.clips;
-    if (applied == 0 || clips == null || !clips.contains(clip)) return 0;
+    if (applied.abs() < _kRounding ||
+        clips == null ||
+        !clips.contains(clip)) {
+      return 0;
+    }
     final edge = clip.timelineStart;
     _freezeMerges();
     if (applied > 0) {
@@ -322,7 +343,11 @@ class ProgramEdit {
     final applied = _clampEdge(delta, kMinPieceDuration - clip.duration,
         clip.sourceDuration - clip.sourceEnd, 0);
     final clips = file.mainVideo?.clips;
-    if (applied == 0 || clips == null || !clips.contains(clip)) return 0;
+    if (applied.abs() < _kRounding ||
+        clips == null ||
+        !clips.contains(clip)) {
+      return 0;
+    }
     final edge = clip.timelineEnd;
     _freezeMerges();
     if (applied < 0) {
@@ -340,7 +365,7 @@ class ProgramEdit {
         other.timelineStart += applied;
       }
     }
-    clip.sourceEnd += applied;
+    clip.sourceEnd = math.min(clip.sourceEnd + applied, clip.sourceDuration);
     return applied;
   }
 }

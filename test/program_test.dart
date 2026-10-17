@@ -90,6 +90,19 @@ void main() {
       rippleDelete(pieces, 0, 90);
       expect(_ranges(pieces), [(90.0, double.infinity, 0.0)]);
     });
+
+    test('leaves no sliver when an edge is a rounding away from the cut', () {
+      final pieces = [
+        _clip(kSource, 0, 10 - 1e-10, 0),
+        _clip(kSource, 300, 310 + 2e-10, 10 - 1e-10),
+        _clip(kSource, 500, 600, 20 + 1e-10),
+      ];
+      rippleDelete(pieces, 10, 20, tolerance: 1e-6);
+      expect(_ranges(pieces), [
+        (0.0, 10 - 1e-10, 0.0),
+        (500.0, 600.0, 20 + 1e-10 - 10),
+      ]);
+    });
   });
 
   group('rippleInsert', () {
@@ -103,6 +116,19 @@ void main() {
       final pieces = [_clip(kSource, 0, 90, 0), _clip(kSource, 90, 600, 90)];
       rippleInsert(pieces, 90, 10);
       expect(_ranges(pieces), [(0.0, 90.0, 0.0), (90.0, 600.0, 100.0)]);
+    });
+
+    test('a boundary a rounding away from the point only pushes', () {
+      for (final drift in [1e-10, -1e-10]) {
+        final pieces = [
+          _clip(kSource, 0, 90 + drift, 0),
+          _clip(kSource, 300, 600, 90 + drift),
+        ];
+        rippleInsert(pieces, 90, 10, tolerance: 1e-6);
+        expect(_ranges(pieces),
+            [(0.0, 90 + drift, 0.0), (300.0, 600.0, 90 + drift + 10)],
+            reason: 'drift $drift');
+      }
     });
   });
 
