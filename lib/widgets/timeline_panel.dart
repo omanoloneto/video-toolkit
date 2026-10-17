@@ -119,6 +119,16 @@ class TimelinePanelState extends State<TimelinePanel> {
   static const _snapPixels = 8.0;
   static const _edgeZone = 6.0;
 
+  // dois dedos no trackpad rolam a linha do tempo; o clique do trackpad
+  // chega como mouse e continua arrastando o trecho
+  static const _pieceDragDevices = {
+    PointerDeviceKind.mouse,
+    PointerDeviceKind.touch,
+    PointerDeviceKind.stylus,
+    PointerDeviceKind.invertedStylus,
+    PointerDeviceKind.unknown,
+  };
+
   double? _pps; // pixels per second; null until fitted to the viewport
   final _scrollController = ScrollController();
   final _headersVController = ScrollController();
@@ -1005,6 +1015,7 @@ class TimelinePanelState extends State<TimelinePanel> {
     final body = MouseRegion(
       cursor: SystemMouseCursors.click,
       child: GestureDetector(
+        supportedDevices: _pieceDragDevices,
         onTap: select,
         onHorizontalDragStart: (_) {
           select();

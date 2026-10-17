@@ -4,6 +4,7 @@ import 'package:video_toolkit/models/tracks.dart';
 import 'package:video_toolkit/services/audio_cache.dart';
 import 'package:video_toolkit/widgets/timeline_panel.dart';
 import 'package:fluent_ui/fluent_ui.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 const kSource = '/tmp/video.mkv';
@@ -379,6 +380,47 @@ void main() {
     expect(second.timelineStart, first.timelineEnd);
     expect(_range(first), (0.0, 40.0, 0.0));
     expect(_range(audio.segments.single), (0.0, 100.0, 0.0));
+  });
+
+  testWidgets('a two-finger swipe over a video clip scrolls the timeline',
+      (tester) async {
+    await useDesktopSurface(tester);
+    final video = _video([_clip(10, 50, 10), _clip(60, 100, 60)]);
+    final file = _file([video, _audio(0)]);
+    final first = video.clips.first;
+
+    await tester.pumpWidget(_wrap(
+      file: file,
+      selection: null,
+      onSelectionChanged: (_) {},
+    ));
+    final zoomIn = find.byWidgetPredicate(
+        (w) => w is Tooltip && w.message == 'Aumentar zoom');
+    for (var i = 0; i < 4; i++) {
+      await tester.tap(zoomIn);
+      await tester.pump(const Duration(milliseconds: 500));
+    }
+
+    final clipBox = find.byKey(ValueKey<Object>(first));
+    final before = tester.getTopLeft(clipBox);
+    final grab = before + const Offset(100, 17);
+    final swipe = await tester.createGesture(kind: PointerDeviceKind.trackpad);
+    await swipe.panZoomStart(grab);
+    for (var pan = 20.0; pan <= 200; pan += 20) {
+      await swipe.panZoomUpdate(grab, pan: Offset(-pan, 0));
+    }
+    await swipe.panZoomEnd();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(_range(first), (10.0, 50.0, 10.0));
+    expect(tester.getTopLeft(clipBox).dx, closeTo(before.dx - 200, 1));
+
+    // clicar e arrastar no trackpad chega como mouse e ainda move o trecho
+    await tester.dragFrom(tester.getTopLeft(clipBox) + const Offset(100, 17),
+        const Offset(100, 0),
+        kind: PointerDeviceKind.mouse);
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(first.timelineStart, greaterThan(10));
   });
 
   testWidgets('audio segments draw the waveform of their source',

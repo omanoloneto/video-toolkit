@@ -287,7 +287,8 @@ class MediaTrack {
   /// Legendas: os pedaços da faixa na linha do tempo.
   final List<SubtitlePiece> pieces = [];
 
-  /// Vídeo principal: o programa, trechos colados a partir do zero.
+  /// Vídeo principal: os trechos do programa; onde não há trecho, a imagem
+  /// fica preta.
   final List<VideoClip> clips = [];
 
   /// Áudio: null deixa a mescla automática (ver [audioLaneMerges]).
