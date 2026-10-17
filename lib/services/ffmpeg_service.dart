@@ -37,6 +37,7 @@ class _AudioLaneDesc {
     required this.language,
     required this.displayName,
     required this.merge,
+    required this.isDefault,
   });
 
   final List<AudioSegment> segments;
@@ -49,6 +50,7 @@ class _AudioLaneDesc {
   final String? language;
   final String displayName;
   final bool? merge;
+  final bool isDefault;
 
   bool get merges =>
       merge ??
@@ -168,6 +170,7 @@ class FfmpegService {
           sourceStart: 0,
           sourceEnd: track.durationSeconds,
           timelineStart: 0,
+          sourceDuration: track.durationSeconds,
         ));
       }
       if (type == TrackType.video &&
@@ -218,6 +221,7 @@ class FfmpegService {
           sourceStart: 0,
           sourceEnd: track.durationSeconds,
           timelineStart: 0,
+          sourceDuration: track.durationSeconds,
         ));
       }
       return track;
@@ -278,6 +282,7 @@ class FfmpegService {
       sourceStart: 0,
       sourceEnd: duration,
       timelineStart: 0,
+      sourceDuration: duration,
     );
   }
 
@@ -506,19 +511,30 @@ class FfmpegService {
         ':${(frame.width - w) ~/ 2}:${(frame.height - h) ~/ 2}';
   }
 
-  /// Legendas cortadas pelo programa: as falas vão pra um arquivo novo antes
-  /// de salvar. Legenda de imagem não dá.
+  /// Legenda inteira que vai copiada: a que não foi adiantada e a de imagem.
+  /// A de texto adiantada é reescrita, pois a cópia com -ss perderia a fala
+  /// que já está na tela no novo começo.
+  static bool _copiesSubtitle(Object lane) => switch (lane) {
+        MediaTrack(:final pieces, :final offsetSeconds, :final codec) ||
+        ExternalTrack(:final pieces, :final offsetSeconds, :final codec) =>
+          subtitleIsWhole(pieces) &&
+              (offsetSeconds >= 0 || _isBitmapSubtitle(codec)),
+        _ => false,
+      };
+
+  /// Legendas cortadas pelo programa ou adiantadas: as falas vão pra um
+  /// arquivo novo antes de salvar. Legenda de imagem não dá.
   static List<Object> subtitlesToRetime(
           MediaFileInfo source, List<ExternalTrack> added) =>
       [
         ...source.tracks.where((t) =>
             t.type == TrackType.subtitle &&
             !t.removed &&
-            !subtitleIsWhole(t.pieces) &&
+            !_copiesSubtitle(t) &&
             !_isBitmapSubtitle(t.codec)),
         ...added.where((t) =>
             t.type == TrackType.subtitle &&
-            !subtitleIsWhole(t.pieces) &&
+            !_copiesSubtitle(t) &&
             !_isBitmapSubtitle(t.codec)),
       ];
 
@@ -586,6 +602,14 @@ class FfmpegService {
       }
     }
 
+    // copiar de uma entrada com -ss traz os pacotes desde o keyframe de antes,
+    // com tempo negativo, e o MKV atrasa o arquivo inteiro por eles
+    void dropBeforeSeek(List<String> inputFlags, String stream) {
+      if (inputFlags.contains('-ss')) {
+        codecArgs.addAll(['-copypriorss:$stream', '0']);
+      }
+    }
+
     // One output audio stream per lane. Untouched lanes are stream-copied;
     // split/trimmed/merged lanes go through a filter graph and are
     // re-encoded to AAC.
@@ -598,6 +622,7 @@ class FfmpegService {
       required String codec,
       required String title,
       required String? language,
+      required bool isDefault,
     }) {
       if (segments.isEmpty) return;
 
@@ -624,6 +649,7 @@ class FfmpegService {
       if (isPassthrough) {
         final inputIndex = inputFor(ownPath, flags: passthroughFlags);
         mapArgs.addAll(['-map', '$inputIndex:a:$ownTypeIndex']);
+        dropBeforeSeek(passthroughFlags, 'a:$outAudio');
         final shrink = compact && _isLossless(codec);
         if (shrink ||
             (isMp4Output && !_mp4AudioCodecs.contains(codec.toLowerCase()))) {
@@ -637,10 +663,13 @@ class FfmpegService {
         for (var k = 0; k < ordered.length; k++) {
           final seg = ordered[k];
           final inputIndex = inputFor(seg.source.path);
+          // o trecho conta do começo dele na origem, não da primeira amostra:
+          // áudio que começa atrasado guarda o atraso, como na prévia
           final chain = StringBuffer(
               '[$inputIndex:a:${seg.source.audioTypeIndex}]'
               'atrim=start=${_s3(seg.sourceStart)}:end=${_s3(seg.sourceEnd)},'
-              'asetpts=PTS-STARTPTS,aresample=48000');
+              'asetpts=PTS-${_s3(seg.sourceStart)}/TB,'
+              'aresample=48000:first_pts=0');
           if (channelLayout != null) {
             chain.write(',aformat=channel_layouts=$channelLayout');
           }
@@ -667,6 +696,10 @@ class FfmpegService {
         laneCounter++;
       }
 
+      // a faixa que passa pelo filtro perde a marca do original e o FFmpeg
+      // marcaria a primeira saída; +/- mantém as outras marcas da faixa
+      metaArgs.addAll(
+          ['-disposition:a:$outAudio', isDefault ? '+default' : '-default']);
       addTitle(title);
       addLanguage(language);
       outAudio++;
@@ -697,6 +730,7 @@ class FfmpegService {
     // ---- audio auto-merge: lanes that were cut apart (fragmentary) are
     // combined into a single output track, mixed at their timeline
     // positions. Whole lanes — untouched or merely delayed — stay separate.
+    final defaultLane = defaultAudioLane(source, added);
     final laneDescs = <_AudioLaneDesc>[
       for (final track
           in source.tracks.where((t) => t.type == TrackType.audio && !t.removed))
@@ -713,6 +747,7 @@ class FfmpegService {
               ? track.title
               : 'Áudio ${track.typeIndex + 1}',
           merge: track.merge,
+          isDefault: identical(track, defaultLane),
         ),
       for (final track in added.where((t) => t.type == TrackType.audio))
         _AudioLaneDesc(
@@ -726,6 +761,7 @@ class FfmpegService {
           language: track.language,
           displayName: track.title,
           merge: track.merge,
+          isDefault: identical(track, defaultLane),
         ),
     ];
 
@@ -765,6 +801,7 @@ class FfmpegService {
           codec: desc.codec,
           title: desc.title,
           language: desc.language,
+          isDefault: merging.any((d) => d.isDefault),
         );
         return;
       }
@@ -777,42 +814,57 @@ class FfmpegService {
         codec: desc.codec,
         title: desc.title,
         language: desc.language,
+        isDefault: desc.isDefault,
       );
     }
 
     // Programa editado: cada trecho vira uma entrada com busca própria (-ss)
     // e corte exato no filtro; tudo é encaixado no quadro do vídeo original.
+    // Trechos e vãos pretos ficam nos quadros do programa em que caem (senão
+    // a imagem se afasta do som a cada vão); o preto sai do trecho seguinte
+    // porque vídeo de celular é decodificado já girado.
     String programLabel(List<VideoClip> clips) {
       final ordered = [...clips]
         ..sort((a, b) => a.timelineStart.compareTo(b.timelineStart));
       final frame = ordered.firstWhere((c) => c.path == source.path,
           orElse: () => ordered.first);
+      int gridFrame(double t) => (t * frame.frameRate - 1e-6).ceil();
       final labels = <String>[];
+      var cursor = 0.0;
+      var cursorFrame = 0;
       for (var k = 0; k < ordered.length; k++) {
         final clip = ordered[k];
+        final start = clip.timelineStart > cursor + 1e-3
+            ? math.max(cursorFrame, gridFrame(clip.timelineStart))
+            : cursorFrame;
+        final end = math.max(start + 1, gridFrame(clip.timelineEnd));
+        final gap = start - cursorFrame;
         final input = inputFor(clip.path, flags: ['-ss', _s3(clip.sourceStart)]);
         final fit = _fitFilter(clip, frame);
+        // tempo da origem, como no áudio: vídeo que começa depois do corte
+        // repete o primeiro quadro até lá, e esse quadro sempre passa (senão
+        // o trecho sairia vazio)
         filterChains.add('[$input:v:${clip.streamTypeIndex}]'
-            'trim=duration=${_s3(clip.duration)},setpts=PTS-STARTPTS'
+            'trim=end=${_s3(clip.duration)}:end_frame=1'
             '${fit == null ? '' : ',$fit'}'
-            ',setsar=${frame.sarNum}/${frame.sarDen},fps=${frame.rate}[pv$k]');
+            ',setsar=${frame.sarNum}/${frame.sarDen}'
+            ',fps=${frame.rate}:start_time=0'
+            ',tpad=${gap > 0 ? 'start=$gap:color=black:' : ''}'
+            'stop=-1:stop_mode=clone,trim=end_frame=${end - cursorFrame}'
+            '[pv$k]');
         labels.add('pv$k');
+        cursor = math.max(cursor, clip.timelineEnd);
+        cursorFrame = end;
       }
       filterChains.add('${labels.map((l) => '[$l]').join()}'
           'concat=n=${labels.length}:v=1:a=0[program]');
       return 'program';
     }
 
-    // legenda cortada pelo programa vem do arquivo reescrito
+    // legenda cortada pelo programa ou adiantada vem do arquivo reescrito
     bool addRetimedSubtitle(Object lane, String codec, String title,
         String? language, String name) {
-      if (subtitleIsWhole(switch (lane) {
-        MediaTrack(:final pieces) => pieces,
-        ExternalTrack(:final pieces) => pieces,
-        _ => const <SubtitlePiece>[],
-      })) {
-        return false;
-      }
+      if (_copiesSubtitle(lane)) return false;
       final file = subtitleFiles[lane];
       if (file == null) {
         warnings.add('A legenda "$name" (${codec.toUpperCase()}) não pode ser '
@@ -821,6 +873,10 @@ class FfmpegService {
       }
       final input = inputFor(file);
       mapArgs.addAll(['-map', '$input:s:0']);
+      // o arquivo reescrito não traz a marca de padrão da faixa
+      if (lane is MediaTrack && lane.isDefault) {
+        metaArgs.addAll(['-disposition:s:$outSub', '+default']);
+      }
       addSubtitleCodecOverride(
           codec.toLowerCase() == 'ass' || codec.toLowerCase() == 'ssa'
               ? 'ass'
@@ -858,12 +914,12 @@ class FfmpegService {
               track, track.codec, track.title, track.language, name)) {
             break;
           }
-          var sourceInput = 0;
-          if (track.offsetSeconds != 0) {
-            sourceInput =
-                inputFor(source.path, flags: offsetFlags(track.offsetSeconds));
-          }
+          final flags = track.offsetSeconds != 0
+              ? offsetFlags(track.offsetSeconds)
+              : const <String>[];
+          final sourceInput = inputFor(source.path, flags: flags);
           mapArgs.addAll(['-map', '$sourceInput:${track.streamIndex}']);
+          dropBeforeSeek(flags, 's:$outSub');
           addSubtitleCodecOverride(track.codec);
           addTitle(track.title);
           outSub++;
@@ -881,11 +937,12 @@ class FfmpegService {
           track, track.codec, track.title, track.language, track.title)) {
         continue;
       }
-      final inputIndex = inputFor(track.path,
-          flags: track.offsetSeconds != 0
-              ? offsetFlags(track.offsetSeconds)
-              : const []);
+      final flags = track.offsetSeconds != 0
+          ? offsetFlags(track.offsetSeconds)
+          : const <String>[];
+      final inputIndex = inputFor(track.path, flags: flags);
       mapArgs.addAll(['-map', '$inputIndex:s:0']);
+      dropBeforeSeek(flags, 's:$outSub');
       addSubtitleCodecOverride(track.codec);
       addTitle(track.title);
       addLanguage(track.language);

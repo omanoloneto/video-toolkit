@@ -15,7 +15,8 @@ MediaTrack _video() => MediaTrack(
       durationSeconds: 600,
     );
 
-MediaTrack _audio(int streamIndex, int typeIndex, {double duration = 600}) {
+MediaTrack _audio(int streamIndex, int typeIndex,
+    {double duration = 600, bool isDefault = false}) {
   final track = MediaTrack(
     streamIndex: streamIndex,
     type: TrackType.audio,
@@ -26,6 +27,7 @@ MediaTrack _audio(int streamIndex, int typeIndex, {double duration = 600}) {
     durationSeconds: duration,
     channelLayout: 'stereo',
     language: 'por',
+    isDefault: isDefault,
   );
   track.segments.add(AudioSegment(
     source: AudioSource(path: kSource, audioTypeIndex: typeIndex),
@@ -37,13 +39,19 @@ MediaTrack _audio(int streamIndex, int typeIndex, {double duration = 600}) {
 }
 
 VideoClip _clip(String path, double start, double end,
-        {int width = 1432, int height = 1080}) =>
+        {int width = 1432,
+        int height = 1080,
+        String rate = '2997/100',
+        int sarNum = 1,
+        int sarDen = 1}) =>
     VideoClip(
       path: path,
       streamTypeIndex: 0,
       width: width,
       height: height,
-      rate: '2997/100',
+      rate: rate,
+      sarNum: sarNum,
+      sarDen: sarDen,
       sourceStart: start,
       sourceEnd: end,
       timelineStart: 0,
@@ -128,6 +136,24 @@ void main() {
       expect(filter, contains('asetpts=N/SR/TB[lane0]'));
     });
 
+    test('a piece keeps its place in the source, even in a late stream', () {
+      final a1 = _audio(1, 0);
+      a1.segments.single
+        ..sourceStart = 60
+        ..sourceEnd = 300
+        ..timelineStart = 30;
+
+      final args = service.buildSaveArgs(
+        source: _file([_video(), a1]),
+        added: [],
+        outputPath: '/tmp/out.mkv',
+      );
+      final filter = args.args[args.args.indexOf('-filter_complex') + 1];
+      expect(filter, contains('[0:a:0]atrim=start=60.000:end=300.000,'
+          'asetpts=PTS-60.000/TB,aresample=48000:first_pts=0,'
+          'aformat=channel_layouts=stereo,adelay=30000:all=1[l0s0]'));
+    });
+
     test('whole-track delay keeps stream copy via -itsoffset', () {
       final a1 = _audio(1, 0);
       a1.segments.single.timelineStart = 2.5;
@@ -141,6 +167,7 @@ void main() {
       expect(joined, contains('-itsoffset 2.500 -i $kSource'));
       expect(joined, contains('-map 1:a:0'));
       expect(joined, isNot(contains('-filter_complex')));
+      expect(joined, isNot(contains('-copypriorss')));
     });
 
     test('trim-only start keeps stream copy via -ss', () {
@@ -155,6 +182,83 @@ void main() {
       final joined = args.args.join(' ');
       expect(joined, contains('-ss 4.000 -i $kSource'));
       expect(joined, isNot(contains('-filter_complex')));
+    });
+
+    test('a copy from a -ss input drops what came before the cut', () {
+      final file = _file([_programVideo(), _audio(1, 0)]);
+      ProgramEdit(file, []).cut(0, 90);
+
+      final joined = service
+          .buildSaveArgs(source: file, added: [], outputPath: '/tmp/out.mkv')
+          .args
+          .join(' ');
+      expect(joined, contains('-ss 90.000 -i $kSource'));
+      expect(joined, contains('-map 1:a:0'));
+      expect(joined, contains('-copypriorss:a:0 0'));
+    });
+
+    test('a text subtitle moved earlier is rewritten, as a cut one is', () {
+      // copiar com -ss perderia a fala que já está na tela no novo começo
+      final sub = MediaTrack(
+        streamIndex: 2,
+        type: TrackType.subtitle,
+        typeIndex: 0,
+        codec: 'SUBRIP',
+        details: '',
+        originalTitle: 'Legenda',
+        durationSeconds: 600,
+      )..offsetSeconds = -2;
+      final external = ExternalTrack(
+        path: '/tmp/sub.srt',
+        type: TrackType.subtitle,
+        codec: 'SUBRIP',
+        details: '',
+        title: 'Legenda PT',
+        durationSeconds: 0,
+      )..offsetSeconds = -1.5;
+      final file = _file([_video(), _audio(1, 0), sub]);
+
+      expect(FfmpegService.subtitlesToRetime(file, [external]),
+          [sub, external]);
+      final result = service.buildSaveArgs(
+        source: file,
+        added: [external],
+        outputPath: '/tmp/out.mp4',
+        subtitleFiles: {
+          sub: '/tmp/adiantada.srt',
+          external: '/tmp/adiantada-pt.srt',
+        },
+      );
+      final joined = result.args.join(' ');
+      expect(joined, contains('-i /tmp/adiantada.srt'));
+      expect(joined, contains('-i /tmp/adiantada-pt.srt'));
+      expect(joined, isNot(contains('-ss')));
+      expect(joined, isNot(contains('-copypriorss')));
+      expect(joined, contains('-c:s:0 mov_text'));
+      expect(joined, contains('-c:s:1 mov_text'));
+      expect(result.warnings, isEmpty);
+    });
+
+    test('a bitmap subtitle moved earlier is copied from its new start', () {
+      final pgs = MediaTrack(
+        streamIndex: 2,
+        type: TrackType.subtitle,
+        typeIndex: 0,
+        codec: 'HDMV_PGS_SUBTITLE',
+        details: '',
+        originalTitle: 'PGS',
+        durationSeconds: 600,
+      )..offsetSeconds = -2;
+      final file = _file([_video(), _audio(1, 0), pgs]);
+
+      expect(FfmpegService.subtitlesToRetime(file, []), isEmpty);
+      final result = service.buildSaveArgs(
+          source: file, added: [], outputPath: '/tmp/out.mkv');
+      final joined = result.args.join(' ');
+      expect(joined, contains('-ss 2.000 -i $kSource'));
+      expect(joined, contains('-map 1:2'));
+      expect(joined, contains('-copypriorss:s:0 0'));
+      expect(result.warnings, isEmpty);
     });
 
     test('subtitle offset uses a flagged duplicate input', () {
@@ -390,6 +494,123 @@ void main() {
     });
   });
 
+  group('default audio', () {
+    ExternalTrack dub({bool? merge, double at = 0}) => ExternalTrack(
+          path: '/tmp/dub.mp3',
+          type: TrackType.audio,
+          codec: 'MP3',
+          details: '',
+          title: 'Dublagem',
+          durationSeconds: 600,
+          channelLayout: 'stereo',
+        )
+          ..merge = merge
+          ..segments.add(AudioSegment(
+            source: const AudioSource(path: '/tmp/dub.mp3', audioTypeIndex: 0),
+            sourceStart: at,
+            sourceEnd: 600,
+            timelineStart: at,
+          ));
+
+    String saved(List<MediaTrack> tracks,
+            {List<ExternalTrack> added = const []}) =>
+        service
+            .buildSaveArgs(
+              source: _file(tracks),
+              added: added,
+              outputPath: '/tmp/out.mkv',
+            )
+            .args
+            .join(' ');
+
+    test('is the flagged track left, else the first, as in the preview', () {
+      final first = _audio(1, 0);
+      final flagged = _audio(2, 1, isDefault: true);
+      final added = dub();
+
+      expect(defaultAudioLane(_file([_video(), first, flagged]), [added]),
+          same(flagged));
+      flagged.removed = true;
+      expect(defaultAudioLane(_file([_video(), first, flagged]), [added]),
+          same(first));
+      expect(defaultAudioLane(_file([_video()]), [added]), same(added));
+      expect(defaultAudioLane(_file([_video()]), []), isNull);
+    });
+
+    test('an edited default track is still the one players open', () {
+      // a faixa que passa pelo filtro perde a marca do original
+      final edited = _audio(2, 1, isDefault: true)
+        ..segments.single.sourceEnd = 300;
+
+      final joined = saved([_video(), _audio(1, 0), edited]);
+      expect(joined, contains('-map 0:a:0 -map [lane0]'));
+      expect(joined, contains('-disposition:a:0 -default'));
+      expect(joined, contains('-disposition:a:1 +default'));
+    });
+
+    test('without a flagged track the first one left is the default', () {
+      final removed = _audio(1, 0, isDefault: true)..removed = true;
+
+      final joined = saved([_video(), removed, _audio(2, 1), _audio(3, 2)],
+          added: [dub()]);
+      expect(joined, contains('-disposition:a:0 +default'));
+      expect(joined, contains('-disposition:a:1 -default'));
+      expect(joined, contains('-disposition:a:2 -default'));
+      expect(joined, isNot(contains('-disposition:a:3')));
+    });
+
+    test('a default track that merges makes the merged track the default', () {
+      final cut = _audio(2, 1, isDefault: true)
+        ..segments.single.sourceEnd = 180;
+
+      final joined = saved([_video(), _audio(1, 0), cut],
+          added: [dub(merge: true, at: 180)]);
+      expect(RegExp(r'-map \[lane').allMatches(joined).length, 1);
+      expect(joined, contains('-disposition:a:0 -default'));
+      expect(joined, contains('-disposition:a:1 +default'));
+      expect(joined, isNot(contains('-disposition:a:2')));
+    });
+
+    test('a cut subtitle keeps the default flag of its track', () {
+      final flagged = MediaTrack(
+        streamIndex: 2,
+        type: TrackType.subtitle,
+        typeIndex: 0,
+        codec: 'ASS',
+        details: '',
+        originalTitle: 'Placas',
+        durationSeconds: 600,
+        isDefault: true,
+      );
+      final plain = MediaTrack(
+        streamIndex: 3,
+        type: TrackType.subtitle,
+        typeIndex: 1,
+        codec: 'ASS',
+        details: '',
+        originalTitle: 'Completa',
+        durationSeconds: 600,
+      );
+      final file = _file([_programVideo(), _audio(1, 0), flagged, plain]);
+      ProgramEdit(file, []).cut(0, 90);
+
+      final joined = service
+          .buildSaveArgs(
+            source: file,
+            added: [],
+            outputPath: '/tmp/out.mkv',
+            subtitleFiles: {
+              flagged: '/tmp/placas.ass',
+              plain: '/tmp/completa.ass',
+            },
+          )
+          .args
+          .join(' ');
+      expect(joined, contains('-disposition:s:0 +default'));
+      expect(joined, isNot(contains('-disposition:s:1')));
+    });
+  });
+
   group('container compatibility', () {
     MediaTrack subTrack(String codec) => MediaTrack(
           streamIndex: 2,
@@ -509,13 +730,33 @@ void main() {
       final filter = result.args[result.args.indexOf('-filter_complex') + 1];
 
       expect(joined, contains('-ss 90.000 -i $kSource'));
-      expect(filter, contains('[1:v:0]trim=duration=510.000,setpts=PTS-STARTPTS,'
-          'setsar=1/1,fps=2997/100[pv0]'));
+      expect(filter, contains('[1:v:0]trim=end=510.000:end_frame=1,'
+          'setsar=1/1,fps=2997/100:start_time=0,tpad=stop=-1:stop_mode=clone,'
+          'trim=end_frame=15285[pv0]'));
       expect(filter, contains('[pv0]concat=n=1:v=1:a=0[program]'));
       expect(joined, contains('-map [program]'));
       expect(joined, contains('-c:v:0 libsvtav1 -preset:v:0 8 -crf:v:0 30'));
       expect(joined, contains('-map_chapters -1'));
       expect(result.warnings.first, contains('AV1'));
+    });
+
+    test('a clip keeps the time of its source, as its audio does', () {
+      // vídeo que começa atrasado no arquivo não é puxado pro começo do
+      // trecho enquanto o som guarda o atraso
+      final file = _file([_programVideo(), _audio(1, 0)]);
+      ProgramEdit(file, []).cut(240, 300);
+
+      final args = service
+          .buildSaveArgs(source: file, added: [], outputPath: '/tmp/out.mkv')
+          .args;
+      final filter = args[args.indexOf('-filter_complex') + 1];
+      expect(filter, isNot(contains('STARTPTS')));
+      expect(filter, contains('[1:v:0]trim=end=240.000:end_frame=1,setsar=1/1,'
+          'fps=2997/100:start_time=0,'));
+      expect(filter, contains('[2:v:0]trim=end=300.000:end_frame=1,setsar=1/1,'
+          'fps=2997/100:start_time=0,'));
+      expect(filter, contains('[0:a:0]atrim=start=0.000:end=240.000,'
+          'asetpts=PTS-0.000/TB,aresample=48000:first_pts=0,'));
     });
 
     test('an inserted video is fitted into the program frame', () {
@@ -538,10 +779,118 @@ void main() {
       final filter = result.args[result.args.indexOf('-filter_complex') + 1];
 
       expect(filter, contains(
-          'scale=1432:806,pad=1432:1080:0:137,setsar=1/1,fps=2997/100[pv0]'));
+          'scale=1432:806,pad=1432:1080:0:137,setsar=1/1,'
+          'fps=2997/100:start_time=0,'
+          'tpad=stop=-1:stop_mode=clone,trim=end_frame=2518[pv0]'));
       expect(filter, contains('[pv0][pv1]concat=n=2:v=1:a=0[program]'));
       expect(filter, contains('[3:a:0]atrim=start=0.000:end=84.000'));
       expect(joined, contains('-c:v:0 libx265'));
+    });
+
+    test('a gap before the first clip is black inside the clip chain', () {
+      final video = _video()
+        ..clips.add(_clip(kSource, 0, 600, sarNum: 32, sarDen: 27)
+          ..timelineStart = 2.5);
+
+      final result = service.buildSaveArgs(
+        source: _file([video, _audio(1, 0)]),
+        added: [],
+        outputPath: '/tmp/out.mkv',
+      );
+      final filter = result.args[result.args.indexOf('-filter_complex') + 1];
+
+      expect(filter, contains('[1:v:0]trim=end=600.000:end_frame=1,'
+          'setsar=32/27,fps=2997/100:start_time=0,'
+          'tpad=start=75:color=black:stop=-1:stop_mode=clone,'
+          'trim=end_frame=18057[pv0]'));
+      expect(filter, isNot(contains('color=c=')));
+      expect(filter, contains('[pv0]concat=n=1:v=1:a=0[program]'));
+    });
+
+    test('a gap between two clips is black and the audio stays whole', () {
+      final video = _programVideo();
+      splitSegment(video.clips, video.clips.single, 300);
+      video.clips.last.timelineStart = 310;
+
+      final result = service.buildSaveArgs(
+        source: _file([video, _audio(1, 0)]),
+        added: [],
+        outputPath: '/tmp/out.mkv',
+      );
+      final joined = result.args.join(' ');
+      final filter = result.args[result.args.indexOf('-filter_complex') + 1];
+
+      expect(joined, contains('-ss 300.000 -i $kSource'));
+      expect(filter, contains('fps=2997/100:start_time=0,'
+          'tpad=stop=-1:stop_mode=clone,trim=end_frame=8991[pv0]'));
+      expect(filter, contains('[2:v:0]trim=end=300.000:end_frame=1,'
+          'setsar=1/1,fps=2997/100:start_time=0,'
+          'tpad=start=300:color=black:stop=-1:stop_mode=clone,'
+          'trim=end_frame=9291[pv1]'));
+      expect(filter, contains('[pv0][pv1]concat=n=2:v=1:a=0[program]'));
+      expect(joined, contains('-map 0:a:0'));
+    });
+
+    test('gaps are counted on the program frames, so they never add up', () {
+      final video = _video()
+        ..clips.addAll([
+          for (var i = 0; i < 4; i++)
+            _clip(kSource, 3.0 * i, 3.0 * (i + 1), rate: '25/1')
+              ..timelineStart = 3.41 * i,
+        ]);
+
+      final result = service.buildSaveArgs(
+        source: _file([video, _audio(1, 0)]),
+        added: [],
+        outputPath: '/tmp/out.mkv',
+      );
+      final filter = result.args[result.args.indexOf('-filter_complex') + 1];
+
+      expect(filter, contains('fps=25/1:start_time=0,'
+          'tpad=stop=-1:stop_mode=clone,trim=end_frame=75[pv0]'));
+      expect(filter, contains('fps=25/1:start_time=0,tpad=start=11:color=black:'
+          'stop=-1:stop_mode=clone,trim=end_frame=86[pv1]'));
+      expect(filter, contains('fps=25/1:start_time=0,tpad=start=10:color=black:'
+          'stop=-1:stop_mode=clone,trim=end_frame=85[pv2]'));
+      expect(filter, contains('fps=25/1:start_time=0,tpad=start=10:color=black:'
+          'stop=-1:stop_mode=clone,trim=end_frame=85[pv3]'));
+    });
+
+    test('a gap between two program frames leaves no black', () {
+      final video = _video()
+        ..clips.addAll([
+          _clip(kSource, 0, 3.01, rate: '25/1'),
+          _clip(kSource, 3.03, 6, rate: '25/1')..timelineStart = 3.03,
+        ]);
+
+      final result = service.buildSaveArgs(
+        source: _file([video, _audio(1, 0)]),
+        added: [],
+        outputPath: '/tmp/out.mkv',
+      );
+      final filter = result.args[result.args.indexOf('-filter_complex') + 1];
+
+      expect(filter, isNot(contains('tpad=start')));
+      expect(filter, contains('trim=end_frame=76[pv0]'));
+      expect(filter, contains('trim=end_frame=74[pv1]'));
+    });
+
+    test('clips less than 1 ms apart touch, with no black between them', () {
+      final video = _programVideo();
+      splitSegment(video.clips, video.clips.single, 300);
+      video.clips.last.timelineStart = 300.0009;
+
+      final result = service.buildSaveArgs(
+        source: _file([video, _audio(1, 0)]),
+        added: [],
+        outputPath: '/tmp/out.mkv',
+      );
+      final filter = result.args[result.args.indexOf('-filter_complex') + 1];
+
+      expect(filter, isNot(contains('tpad=start')));
+      expect(filter, contains('trim=end_frame=8991[pv0]'));
+      expect(filter, contains('trim=end_frame=8992[pv1]'));
+      expect(filter, contains('[pv0][pv1]concat=n=2:v=1:a=0[program]'));
     });
 
     test('compacting an untouched file keeps it whole but shrinks it', () {

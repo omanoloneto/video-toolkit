@@ -79,26 +79,6 @@ VideoClip? clipAt(List<VideoClip> clips, double t) {
   return null;
 }
 
-/// Tempo do arquivo original no instante [t] do programa; null quando ali
-/// toca um vídeo inserido (ou já passou do fim).
-double? sourceTimeAt(List<VideoClip> clips, String sourcePath, double t) {
-  final clip = clipAt(clips, t);
-  if (clip == null || clip.path != sourcePath) return null;
-  return clip.sourceStart + (t - clip.timelineStart);
-}
-
-/// O trecho que começa onde [clip] termina.
-VideoClip? clipAfter(List<VideoClip> clips, VideoClip clip) {
-  VideoClip? next;
-  for (final c in clips) {
-    if (identical(c, clip) || c.timelineStart < clip.timelineEnd - 0.001) {
-      continue;
-    }
-    if (next == null || c.timelineStart < next.timelineStart) next = c;
-  }
-  return next;
-}
-
 /// O programa ainda é o vídeo original inteiro.
 bool programUntouched(MediaFileInfo file) {
   final video = file.mainVideo;
@@ -109,6 +89,99 @@ bool programUntouched(MediaFileInfo file) {
       clip.sourceStart.abs() < 0.005 &&
       clip.timelineStart.abs() < 0.005 &&
       clip.sourceEnd >= video.durationSeconds - 0.05;
+}
+
+/// A faixa de áudio que os players abrem no arquivo salvo: a primeira
+/// marcada como padrão entre as do arquivo que ficam ou, sem marca, a
+/// primeira na ordem do salvar. Null sem áudio.
+Object? defaultAudioLane(MediaFileInfo file, List<ExternalTrack> added) {
+  final own =
+      file.tracks.where((t) => t.type == TrackType.audio && !t.removed);
+  return own.where((t) => t.isDefault).firstOrNull ??
+      own.firstOrNull ??
+      added.where((t) => t.type == TrackType.audio).firstOrNull;
+}
+
+/// Menor trecho que arrastar uma borda deixa.
+const double kMinPieceDuration = 0.05;
+
+// bordas a menos de um arredondamento do double são a mesma borda
+const double _kRounding = 1e-6;
+
+/// Até onde a borda esquerda de [segment] vai quando arrastada pra [wanted]:
+/// não passa do começo da origem, do zero nem do fim do vizinho à esquerda,
+/// e o trecho não fica menor que [kMinPieceDuration].
+double clampSegmentStart<T extends TimelinePiece>(
+    List<T> lane, T segment, double wanted) {
+  var lower = math.max(0.0, segment.timelineStart - segment.sourceStart);
+  for (final other in lane) {
+    if (!identical(other, segment) &&
+        other.timelineEnd <= segment.timelineStart + _kRounding) {
+      lower = math.max(lower, other.timelineEnd);
+    }
+  }
+  return _clampEdge(wanted, lower, segment.timelineEnd - kMinPieceDuration,
+      segment.timelineStart);
+}
+
+/// Até onde a borda direita de [segment] vai quando arrastada pra [wanted]:
+/// não passa do fim da origem nem do começo do vizinho à direita, e o trecho
+/// não fica menor que [kMinPieceDuration].
+double clampSegmentEnd<T extends TimelinePiece>(
+    List<T> lane, T segment, double wanted) {
+  var upper = segment.timelineStart +
+      (segment.sourceDuration - segment.sourceStart);
+  for (final other in lane) {
+    if (!identical(other, segment) &&
+        other.timelineStart >= segment.timelineEnd - _kRounding) {
+      upper = math.min(upper, other.timelineStart);
+    }
+  }
+  return _clampEdge(wanted, segment.timelineStart + kMinPieceDuration, upper,
+      segment.timelineEnd);
+}
+
+/// Onde [piece] começa quando arrastado inteiro pra [wanted]: não passa do
+/// zero nem entra nos vizinhos de [lane]; sem espaço, fica onde está.
+double clampMove<T extends TimelinePiece>(
+    List<T> lane, T piece, double wanted) {
+  var lower = 0.0, upper = double.infinity;
+  for (final other in lane) {
+    if (identical(other, piece)) continue;
+    if (other.timelineEnd <= piece.timelineStart + _kRounding) {
+      lower = math.max(lower, other.timelineEnd);
+    }
+    if (other.timelineStart >= piece.timelineEnd - _kRounding) {
+      upper = math.min(upper, other.timelineStart);
+    }
+  }
+  return _clampEdge(
+      wanted, lower, upper - piece.duration, piece.timelineStart);
+}
+
+// limite que o trecho já não cumpria não empurra a borda: sem espaço, ela
+// fica onde está
+double _clampEdge(double wanted, double lower, double upper, double current) =>
+    wanted.clamp(math.min(lower, current), math.max(upper, current));
+
+/// Arrasta a borda esquerda de [segment] pra [wanted] (ver
+/// [clampSegmentStart]); o resto do trecho não sai do lugar.
+void trimSegmentStart<T extends TimelinePiece>(
+    List<T> lane, T segment, double wanted) {
+  final start = clampSegmentStart(lane, segment, wanted);
+  segment
+    ..sourceStart = math.max(
+        0.0, segment.sourceStart + (start - segment.timelineStart))
+    ..timelineStart = start;
+}
+
+/// Arrasta a borda direita de [segment] pra [wanted] (ver [clampSegmentEnd]).
+void trimSegmentEnd<T extends TimelinePiece>(
+    List<T> lane, T segment, double wanted) {
+  segment.sourceEnd = math.min(
+      segment.sourceDuration,
+      segment.sourceEnd +
+          (clampSegmentEnd(lane, segment, wanted) - segment.timelineEnd));
 }
 
 /// Edições do programa: o vídeo é cortado ou ganha trecho e todas as outras
@@ -197,6 +270,7 @@ class ProgramEdit {
           sourceStart: clip.sourceStart,
           sourceEnd: math.min(clip.sourceEnd, audioDuration),
           timelineStart: position,
+          sourceDuration: audioDuration,
         ))
         ..sort((a, b) => a.timelineStart.compareTo(b.timelineStart));
     }
