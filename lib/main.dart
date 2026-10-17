@@ -1,11 +1,13 @@
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart' show kReleaseMode;
 import 'package:fluent_ui/fluent_ui.dart';
 import 'package:macos_window_utils/macos_window_utils.dart';
 import 'package:media_kit/media_kit.dart';
 
 import 'screens/editor_screen.dart';
+import 'services/updater.dart';
 import 'theme/app_themes.dart';
 
 Future<void> main(List<String> args) async {
@@ -19,15 +21,22 @@ Future<void> main(List<String> args) async {
   runApp(AudioVideoEditorApp(
     initialPath: args.isNotEmpty ? args.first : null,
     initialThemeId: savedTheme,
+    updater: kReleaseMode ? Updater() : null,
   ));
 }
 
 class AudioVideoEditorApp extends StatefulWidget {
-  const AudioVideoEditorApp({super.key, this.initialPath, this.initialThemeId});
+  const AudioVideoEditorApp({
+    super.key,
+    this.initialPath,
+    this.initialThemeId,
+    this.updater,
+  });
 
   /// Optional video path passed on the command line.
   final String? initialPath;
   final String? initialThemeId;
+  final Updater? updater;
 
   @override
   State<AudioVideoEditorApp> createState() => _AudioVideoEditorAppState();
@@ -75,7 +84,10 @@ class _AudioVideoEditorAppState extends State<AudioVideoEditorApp> {
       home: AppThemeScope(
         spec: _spec,
         setTheme: _setTheme,
-        child: EditorScreen(initialPath: widget.initialPath),
+        child: EditorScreen(
+          initialPath: widget.initialPath,
+          updater: widget.updater,
+        ),
       ),
     );
   }
