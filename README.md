@@ -81,14 +81,29 @@ copied bit-for-bit.
 
 ## Download
 
-Grab the latest build from the
+Download page: **[omanoloneto.pro/video-toolkit](https://omanoloneto.pro/video-toolkit/)**
+— or grab the files from the
 [Releases page](https://github.com/omanoloneto/video-toolkit/releases):
 
 | Platform | File | Notes |
 | --- | --- | --- |
-| macOS | `VideoToolkit-<version>-macos.zip` | Unzip, drag to Applications. The build is not notarized, so macOS blocks it on first launch — see [Opening on macOS](#opening-on-macos). |
-| Windows | `VideoToolkit-<version>-windows.zip` | Unzip anywhere, run `video_toolkit.exe`. |
-| Linux (Debian/Ubuntu) | `video-toolkit_<version>_amd64.deb` | `sudo apt install ./video-toolkit_<version>_amd64.deb` |
+| macOS | `VideoToolkit-macos.zip` | Unzip, drag to Applications. The build is not notarized, so macOS blocks it on first launch — see [Opening on macOS](#opening-on-macos). |
+| Windows | `VideoToolkit-windows.zip` | Unzip to a folder you own (not Program Files, so updates can write there), run `video_toolkit.exe`. |
+| Linux (Debian/Ubuntu) | `video-toolkit-linux-amd64.deb` | `sudo apt install ./video-toolkit-linux-amd64.deb` |
+
+File names are fixed, so
+`https://github.com/omanoloneto/video-toolkit/releases/latest/download/<file>`
+always points to the newest build; `SHA256SUMS.txt` lists their checksums.
+
+### Updates
+
+The app checks GitHub for a newer release when it opens. If there is one it
+downloads the file for your system, checks it against `SHA256SUMS.txt` and
+replaces itself, then reopens on the new version (if a video is open it asks
+first and reopens it). macOS swaps the `.app` in place; Windows swaps the files
+after the app closes; Linux installs the new `.deb` through `pkexec` (it asks
+for your password). When that is not possible — a read-only folder, no
+network — it points you to the download page.
 
 **FFmpeg is required on every platform** — Video Toolkit drives `ffmpeg` and
 `ffprobe` under the hood:
@@ -191,6 +206,8 @@ dart run tool/e2e.dart  # end-to-end against a real ffmpeg: generates media,
 flutter test integration_test -d macos  # runs the real app: trims audio and
                         # video by their edges and checks what libmpv loads
                         # and plays
+dart run tool/windows_update_check.dart  # Windows only (CI): the update
+                        # script swaps a fake install and reopens the app
 ```
 
 ## Project layout
@@ -202,6 +219,7 @@ lib/
   services/ffmpeg_service.dart# probing + ffmpeg command construction
   services/media_cache.dart   # per-track audio copies, waveforms, gap fillers
   services/preview_plan.dart  # what the preview plays (mpv EDL)
+  services/updater.dart       # self-update from GitHub Releases
   screens/editor_screen.dart  # app shell, menu bar, playback state
   widgets/timeline_panel.dart # timeline: lanes, clips, ruler, playhead
   widgets/preview_panel.dart  # video preview + audio monitoring
