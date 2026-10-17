@@ -1,9 +1,12 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:path/path.dart' as p;
 
+import '../models/program.dart';
 import '../models/tracks.dart';
+import 'subtitle_retime.dart';
 
 class FfmpegRunResult {
   FfmpegRunResult({required this.exitCode, required this.stderr});
@@ -33,6 +36,7 @@ class _AudioLaneDesc {
     required this.title,
     required this.language,
     required this.displayName,
+    required this.merge,
   });
 
   final List<AudioSegment> segments;
@@ -44,13 +48,50 @@ class _AudioLaneDesc {
   final String title;
   final String? language;
   final String displayName;
+  final bool? merge;
 
-  bool get fragmentary => audioLaneIsFragmentary(
+  bool get merges =>
+      merge ??
+      audioLaneIsFragmentary(
         segments: segments,
         ownPath: ownPath,
         ownTypeIndex: ownTypeIndex,
         durationSeconds: ownDuration,
       );
+}
+
+/// Os dois caminhos apontam pro mesmo arquivo (mesmo escrito diferente:
+/// APFS ignora maiúsculas, /tmp é link).
+Future<bool> isSameFile(String a, String b) async {
+  if (p.equals(p.normalize(a), p.normalize(b))) return true;
+  try {
+    if (!await File(a).exists() || !await File(b).exists()) return false;
+    return await FileSystemEntity.identical(a, b);
+  } on FileSystemException {
+    return false;
+  }
+}
+
+/// Como sai a imagem ao salvar.
+enum VideoFormat {
+  /// Copia sem recodificar; só dá quando o vídeo não foi cortado.
+  keep,
+
+  /// O menor arquivo pra mesma qualidade (medido: metade do original).
+  av1,
+
+  /// Quase o mesmo tamanho do AV1, toca em mais aparelhos, bem mais lento.
+  hevc,
+}
+
+/// Um vídeo pronto pra ser inserido no programa.
+class InsertableVideo {
+  InsertableVideo({required this.clip, required this.audioDuration});
+
+  final VideoClip clip;
+
+  /// 0 quando o arquivo não tem áudio.
+  final double audioDuration;
 }
 
 class SaveArgsResult {
@@ -129,6 +170,12 @@ class FfmpegService {
           timelineStart: 0,
         ));
       }
+      if (type == TrackType.video &&
+          !tracks.any((t) => t.clips.isNotEmpty)) {
+        final clip =
+            _clipOf(stream, path, typeIndex, track.durationSeconds);
+        if (clip != null) track.clips.add(clip);
+      }
       tracks.add(track);
     }
 
@@ -176,6 +223,70 @@ class FfmpegService {
       return track;
     }
     return null;
+  }
+
+  /// Lê um vídeo pra inserir no programa; null quando não tem imagem.
+  Future<InsertableVideo?> probeVideoClip(String path) async {
+    final json = await _probeJson(path);
+    final format = json['format'] as Map<String, dynamic>? ?? {};
+    final streams = (json['streams'] as List? ?? []).cast<Map<String, dynamic>>();
+    final formatDuration =
+        double.tryParse(format['duration'] as String? ?? '') ?? 0;
+
+    VideoClip? clip;
+    var videoIndex = -1;
+    var audioDuration = 0.0;
+    for (final stream in streams) {
+      final type = _trackType(stream['codec_type'] as String?);
+      final tags = (stream['tags'] as Map?)?.cast<String, dynamic>() ?? {};
+      final duration = _streamDuration(stream, tags, formatDuration);
+      if (type == TrackType.video) {
+        videoIndex++;
+        clip ??= _clipOf(stream, path, videoIndex, duration);
+      } else if (type == TrackType.audio && audioDuration == 0) {
+        audioDuration = duration;
+      }
+    }
+    if (clip == null) return null;
+    return InsertableVideo(clip: clip, audioDuration: audioDuration);
+  }
+
+  // capa de MP4 (attached_pic) também é stream de vídeo, mas não é o filme
+  VideoClip? _clipOf(Map<String, dynamic> stream, String path, int typeIndex,
+      double duration) {
+    final disposition =
+        (stream['disposition'] as Map?)?.cast<String, dynamic>() ?? {};
+    final width = stream['width'] as int?, height = stream['height'] as int?;
+    if (disposition['attached_pic'] == 1 ||
+        width == null ||
+        height == null ||
+        duration <= 0) {
+      return null;
+    }
+    final (sarNum, sarDen) = _parseRatio(stream['sample_aspect_ratio'] as String?);
+    final rate = [stream['avg_frame_rate'], stream['r_frame_rate']]
+            .whereType<String>()
+            .firstWhere((r) => (_parseFps(r) ?? 0) > 0, orElse: () => '') ;
+    return VideoClip(
+      path: path,
+      streamTypeIndex: typeIndex,
+      width: width,
+      height: height,
+      rate: rate.isEmpty ? '30' : rate,
+      sarNum: sarNum,
+      sarDen: sarDen,
+      sourceStart: 0,
+      sourceEnd: duration,
+      timelineStart: 0,
+    );
+  }
+
+  (int, int) _parseRatio(String? ratio) {
+    final parts = (ratio ?? '').split(':');
+    final num = parts.isNotEmpty ? int.tryParse(parts.first) : null;
+    final den = parts.length > 1 ? int.tryParse(parts[1]) : null;
+    if (num == null || den == null || num <= 0 || den <= 0) return (1, 1);
+    return (num, den);
   }
 
   Future<Map<String, dynamic>> _probeJson(String path) async {
@@ -330,7 +441,86 @@ class FfmpegService {
     ..._bitmapSubtitleCodecs,
   };
 
+  /// Áudio sem perda: vale encolher quando o arquivo está sendo compactado.
+  static const _losslessAudioCodecs = {
+    'flac', 'alac', 'truehd', 'mlp', 'wavpack', 'tta', 'ape',
+  };
+
+  static bool _isLossless(String codec) {
+    final c = codec.toLowerCase();
+    return _losslessAudioCodecs.contains(c) || c.startsWith('pcm_');
+  }
+
+  static bool _isBitmapSubtitle(String codec) =>
+      _bitmapSubtitleCodecs.contains(codec.toLowerCase());
+
   static String _s3(double v) => v.toStringAsFixed(3);
+
+  static String formatName(VideoFormat format) => switch (format) {
+        VideoFormat.keep => 'original',
+        VideoFormat.av1 => 'AV1',
+        VideoFormat.hevc => 'H.265',
+      };
+
+  // ajustes medidos num episódio de anime 1080p: metade do tamanho com
+  // VMAF ~96,5 (praticamente igual ao original)
+  static List<String> _videoEncoder(VideoFormat format, int index, bool mp4) =>
+      switch (format) {
+        VideoFormat.keep => const [],
+        VideoFormat.av1 => [
+            '-c:v:$index', 'libsvtav1',
+            '-preset:v:$index', '8',
+            '-crf:v:$index', '30',
+            '-pix_fmt:v:$index', 'yuv420p10le',
+          ],
+        VideoFormat.hevc => [
+            '-c:v:$index', 'libx265',
+            '-preset:v:$index', 'fast',
+            '-crf:v:$index', '21',
+            '-pix_fmt:v:$index', 'yuv420p10le',
+            '-x265-params:v:$index', 'log-level=error',
+            if (mp4) ...['-tag:v:$index', 'hvc1'],
+          ],
+      };
+
+  /// Encaixa o trecho inserido no quadro do programa (mantém a proporção, com
+  /// faixas pretas); null quando já tem o mesmo formato.
+  static String? _fitFilter(VideoClip clip, VideoClip frame) {
+    if (clip.width == frame.width &&
+        clip.height == frame.height &&
+        (clip.sar - frame.sar).abs() < 1e-6) {
+      return null;
+    }
+    int even(double v) => (v / 2).round() * 2;
+    final clipAspect = clip.width * clip.sar / clip.height;
+    final frameAspect = frame.width * frame.sar / frame.height;
+    final int w, h;
+    if (clipAspect >= frameAspect) {
+      w = frame.width;
+      h = math.min(frame.height, even(frame.width * frame.sar / clipAspect));
+    } else {
+      h = frame.height;
+      w = math.min(frame.width, even(frame.height * clipAspect / frame.sar));
+    }
+    return 'scale=$w:$h,pad=${frame.width}:${frame.height}'
+        ':${(frame.width - w) ~/ 2}:${(frame.height - h) ~/ 2}';
+  }
+
+  /// Legendas cortadas pelo programa: as falas vão pra um arquivo novo antes
+  /// de salvar. Legenda de imagem não dá.
+  static List<Object> subtitlesToRetime(
+          MediaFileInfo source, List<ExternalTrack> added) =>
+      [
+        ...source.tracks.where((t) =>
+            t.type == TrackType.subtitle &&
+            !t.removed &&
+            !subtitleIsWhole(t.pieces) &&
+            !_isBitmapSubtitle(t.codec)),
+        ...added.where((t) =>
+            t.type == TrackType.subtitle &&
+            !subtitleIsWhole(t.pieces) &&
+            !_isBitmapSubtitle(t.codec)),
+      ];
 
   /// Builds the full ffmpeg argument list for [save]. Pure — no I/O — so
   /// it can be unit-tested. The output path is always the last argument.
@@ -338,15 +528,29 @@ class FfmpegService {
     required MediaFileInfo source,
     required List<ExternalTrack> added,
     required String outputPath,
+    VideoFormat videoFormat = VideoFormat.keep,
+    Map<Object, String> subtitleFiles = const {},
   }) {
     final isMp4Output = p.extension(outputPath).toLowerCase() == '.mp4';
     final warnings = <String>[];
+    final mainVideo = source.mainVideo;
+    final edited = !programUntouched(source);
+    // cortar o vídeo exige recodificar: corte exato fora do keyframe
+    final format = edited && videoFormat == VideoFormat.keep
+        ? VideoFormat.av1
+        : videoFormat;
+    final compact = format != VideoFormat.keep;
+    if (compact && mainVideo != null) {
+      warnings.add('O vídeo será recodificado em ${formatName(format)} — '
+          'salvar pode levar alguns minutos.');
+    }
+    var compactedAudio = false;
 
     // ---- input registry: one entry per unique (flags, path) pair.
     final inputArgs = <String>[];
     final inputKeys = <String>[];
     int inputFor(String path, {List<String> flags = const []}) {
-      final key = '${flags.join(' ')}|$path';
+      final key = '${flags.join('\u0000')}|$path';
       final existing = inputKeys.indexOf(key);
       if (existing != -1) return existing;
       inputKeys.add(key);
@@ -367,6 +571,7 @@ class FfmpegService {
     final codecArgs = <String>[];
     final filterChains = <String>[];
     var outIndex = 0;
+    var outVideo = 0;
     var outAudio = 0;
     var outSub = 0;
     var laneCounter = 0;
@@ -419,8 +624,11 @@ class FfmpegService {
       if (isPassthrough) {
         final inputIndex = inputFor(ownPath, flags: passthroughFlags);
         mapArgs.addAll(['-map', '$inputIndex:a:$ownTypeIndex']);
-        if (isMp4Output && !_mp4AudioCodecs.contains(codec.toLowerCase())) {
+        final shrink = compact && _isLossless(codec);
+        if (shrink ||
+            (isMp4Output && !_mp4AudioCodecs.contains(codec.toLowerCase()))) {
           codecArgs.addAll(['-c:a:$outAudio', 'aac', '-b:a:$outAudio', '256k']);
+          if (shrink) compactedAudio = true;
         }
       } else {
         final ordered = [...segments]
@@ -444,12 +652,15 @@ class FfmpegService {
           labels.add(label);
         }
         final laneLabel = 'lane$laneCounter';
+        // FFmpeg 9: amix cujo primeiro trecho começa atrasado (adelay) sai com
+        // timestamps inválidos e o arquivo fica com duração "infinita"
+        const retime = 'asetpts=N/SR/TB';
         if (labels.length == 1) {
-          filterChains.add('[${labels.single}]anull[$laneLabel]');
+          filterChains.add('[${labels.single}]$retime[$laneLabel]');
         } else {
           filterChains.add(
               '${labels.map((l) => '[$l]').join()}amix=inputs=${labels.length}'
-              ':duration=longest:normalize=0[$laneLabel]');
+              ':duration=longest:normalize=0,$retime[$laneLabel]');
         }
         mapArgs.addAll(['-map', '[$laneLabel]']);
         codecArgs.addAll(['-c:a:$outAudio', 'aac', '-b:a:$outAudio', '256k']);
@@ -501,6 +712,7 @@ class FfmpegService {
           displayName: track.title.isNotEmpty
               ? track.title
               : 'Áudio ${track.typeIndex + 1}',
+          merge: track.merge,
         ),
       for (final track in added.where((t) => t.type == TrackType.audio))
         _AudioLaneDesc(
@@ -513,17 +725,18 @@ class FfmpegService {
           title: track.title,
           language: track.language,
           displayName: track.title,
+          merge: track.merge,
         ),
     ];
 
-    final fragmentary = laneDescs.where((d) => d.fragmentary).toList();
-    final autoMerge = fragmentary.length >= 2;
+    final merging = laneDescs.where((d) => d.merges).toList();
+    final autoMerge = merging.length >= 2;
     var mergedSegments = const <AudioSegment>[];
     if (autoMerge) {
-      mergedSegments = fragmentary.expand((d) => d.segments).toList()
+      mergedSegments = merging.expand((d) => d.segments).toList()
         ..sort((a, b) => a.timelineStart.compareTo(b.timelineStart));
-      warnings.add('As faixas editadas '
-          '(${fragmentary.map((d) => '"${d.displayName}"').join(', ')}) serão '
+      warnings.add('As faixas '
+          '${merging.map((d) => '"${d.displayName}"').join(', ')} serão '
           'mescladas em uma única faixa de áudio, na posição em que estão na '
           'linha do tempo.');
       for (var i = 1; i < mergedSegments.length; i++) {
@@ -539,10 +752,10 @@ class FfmpegService {
     var laneCursor = 0;
     void emitNextAudioLane() {
       final desc = laneDescs[laneCursor++];
-      if (autoMerge && desc.fragmentary) {
-        // The merged track takes the slot of the first fragmentary lane;
+      if (autoMerge && desc.merges) {
+        // The merged track takes the slot of the first merging lane;
         // the others contribute their segments and emit nothing.
-        if (!identical(desc, fragmentary.first)) return;
+        if (!identical(desc, merging.first)) return;
         addAudioLane(
           segments: mergedSegments,
           ownPath: desc.ownPath,
@@ -567,11 +780,72 @@ class FfmpegService {
       );
     }
 
+    // Programa editado: cada trecho vira uma entrada com busca própria (-ss)
+    // e corte exato no filtro; tudo é encaixado no quadro do vídeo original.
+    String programLabel(List<VideoClip> clips) {
+      final ordered = [...clips]
+        ..sort((a, b) => a.timelineStart.compareTo(b.timelineStart));
+      final frame = ordered.firstWhere((c) => c.path == source.path,
+          orElse: () => ordered.first);
+      final labels = <String>[];
+      for (var k = 0; k < ordered.length; k++) {
+        final clip = ordered[k];
+        final input = inputFor(clip.path, flags: ['-ss', _s3(clip.sourceStart)]);
+        final fit = _fitFilter(clip, frame);
+        filterChains.add('[$input:v:${clip.streamTypeIndex}]'
+            'trim=duration=${_s3(clip.duration)},setpts=PTS-STARTPTS'
+            '${fit == null ? '' : ',$fit'}'
+            ',setsar=${frame.sarNum}/${frame.sarDen},fps=${frame.rate}[pv$k]');
+        labels.add('pv$k');
+      }
+      filterChains.add('${labels.map((l) => '[$l]').join()}'
+          'concat=n=${labels.length}:v=1:a=0[program]');
+      return 'program';
+    }
+
+    // legenda cortada pelo programa vem do arquivo reescrito
+    bool addRetimedSubtitle(Object lane, String codec, String title,
+        String? language, String name) {
+      if (subtitleIsWhole(switch (lane) {
+        MediaTrack(:final pieces) => pieces,
+        ExternalTrack(:final pieces) => pieces,
+        _ => const <SubtitlePiece>[],
+      })) {
+        return false;
+      }
+      final file = subtitleFiles[lane];
+      if (file == null) {
+        warnings.add('A legenda "$name" (${codec.toUpperCase()}) não pode ser '
+            'cortada junto com o vídeo — será descartada.');
+        return true;
+      }
+      final input = inputFor(file);
+      mapArgs.addAll(['-map', '$input:s:0']);
+      addSubtitleCodecOverride(
+          codec.toLowerCase() == 'ass' || codec.toLowerCase() == 'ssa'
+              ? 'ass'
+              : 'subrip');
+      addTitle(title);
+      addLanguage(language);
+      outSub++;
+      outIndex++;
+      return true;
+    }
+
     for (final track in source.tracks.where((t) => !t.removed)) {
       switch (track.type) {
         case TrackType.video:
-          mapArgs.addAll(['-map', '0:${track.streamIndex}']);
+          final isMain = identical(track, mainVideo);
+          if (isMain && edited) {
+            mapArgs.addAll(['-map', '[${programLabel(track.clips)}]']);
+          } else {
+            mapArgs.addAll(['-map', '0:${track.streamIndex}']);
+          }
+          if (isMain) {
+            codecArgs.addAll(_videoEncoder(format, outVideo, isMp4Output));
+          }
           addTitle(track.title);
+          outVideo++;
           outIndex++;
         case TrackType.audio:
           emitNextAudioLane();
@@ -580,6 +854,10 @@ class FfmpegService {
               ? track.title
               : 'Legenda ${track.typeIndex + 1}';
           if (skipSubtitle(track.codec, name)) break;
+          if (addRetimedSubtitle(
+              track, track.codec, track.title, track.language, name)) {
+            break;
+          }
           var sourceInput = 0;
           if (track.offsetSeconds != 0) {
             sourceInput =
@@ -599,6 +877,10 @@ class FfmpegService {
 
     for (final track in added.where((t) => t.type == TrackType.subtitle)) {
       if (skipSubtitle(track.codec, track.title)) continue;
+      if (addRetimedSubtitle(
+          track, track.codec, track.title, track.language, track.title)) {
+        continue;
+      }
       final inputIndex = inputFor(track.path,
           flags: track.offsetSeconds != 0
               ? offsetFlags(track.offsetSeconds)
@@ -617,6 +899,10 @@ class FfmpegService {
     if (hasStreams && !isMp4Output) {
       mapArgs.addAll(['-map', '0:t?']);
     }
+    if (compactedAudio) {
+      warnings.add('O áudio sem perda (FLAC, PCM...) vira AAC 256 kb/s, '
+          'bem menor e sem diferença audível.');
+    }
 
     final args = [
       '-y',
@@ -629,6 +915,8 @@ class FfmpegService {
       '-c', 'copy',
       ...codecArgs,
       '-map_metadata', '0',
+      // capítulos do original apontariam pro lugar errado depois do corte
+      if (edited) ...['-map_chapters', '-1'],
       ...metaArgs,
       if (isMp4Output) ...['-movflags', '+faststart'],
       outputPath,
@@ -643,20 +931,100 @@ class FfmpegService {
     required MediaFileInfo source,
     required List<ExternalTrack> added,
     required String outputPath,
+    VideoFormat videoFormat = VideoFormat.keep,
   }) =>
-      buildSaveArgs(source: source, added: added, outputPath: outputPath)
-          .warnings;
+      buildSaveArgs(
+        source: source,
+        added: added,
+        outputPath: outputPath,
+        videoFormat: videoFormat,
+        subtitleFiles: {
+          for (final lane in subtitlesToRetime(source, added)) lane: '',
+        },
+      ).warnings;
 
   Future<FfmpegRunResult> save({
     required MediaFileInfo source,
     required List<ExternalTrack> added,
     required String outputPath,
+    VideoFormat videoFormat = VideoFormat.keep,
+    void Function(double progress)? onProgress,
+  }) async {
+    final workDir = await Directory.systemTemp.createTemp('vt-save-');
+    try {
+      final subtitleFiles = <Object, String>{};
+      for (final lane in subtitlesToRetime(source, added)) {
+        final retimed = await _retimeSubtitleFile(source, lane, workDir.path,
+            subtitleFiles.length);
+        if (!retimed.success) return retimed.result!;
+        subtitleFiles[lane] = retimed.path!;
+      }
+      return await _render(
+        source: source,
+        added: added,
+        outputPath: outputPath,
+        videoFormat: videoFormat,
+        subtitleFiles: subtitleFiles,
+        onProgress: onProgress,
+      );
+    } finally {
+      try {
+        await workDir.delete(recursive: true);
+      } on FileSystemException {
+        // pasta temporária do sistema; o próprio sistema limpa depois
+      }
+    }
+  }
+
+  /// Extrai a legenda como texto, passa as falas pelos pedaços e grava.
+  Future<({bool success, String? path, FfmpegRunResult? result})>
+      _retimeSubtitleFile(MediaFileInfo source, Object lane, String dir,
+          int n) async {
+    final (path, map, codec, pieces, name) = switch (lane) {
+      final MediaTrack t => (
+          source.path,
+          '0:${t.streamIndex}',
+          t.codec,
+          t.pieces,
+          t.title.isNotEmpty ? t.title : 'Legenda ${t.typeIndex + 1}',
+        ),
+      final ExternalTrack t => (t.path, '0:s:0', t.codec, t.pieces, t.title),
+      _ => throw ArgumentError(lane),
+    };
+    final ass = codec.toLowerCase() == 'ass' || codec.toLowerCase() == 'ssa';
+    final extracted = p.join(dir, 'original_$n.${ass ? 'ass' : 'srt'}');
+    final run = await _run(
+        ['-y', '-i', path, '-map', map, '-c:s', ass ? 'ass' : 'srt', extracted]);
+    if (!run.success) {
+      return (
+        success: false,
+        path: null,
+        result: FfmpegRunResult(
+            exitCode: run.exitCode,
+            stderr: 'Não foi possível cortar a legenda "$name":\n${run.stderr}'),
+      );
+    }
+    final text = await File(extracted).readAsString();
+    final retimed = p.join(dir, 'cortada_$n.${ass ? 'ass' : 'srt'}');
+    await File(retimed).writeAsString(retimeSubtitle(
+        text, ass ? SubtitleText.ass : SubtitleText.srt, pieces));
+    return (success: true, path: retimed, result: null);
+  }
+
+  Future<FfmpegRunResult> _render({
+    required MediaFileInfo source,
+    required List<ExternalTrack> added,
+    required String outputPath,
+    required VideoFormat videoFormat,
+    required Map<Object, String> subtitleFiles,
     void Function(double progress)? onProgress,
   }) async {
     final built = buildSaveArgs(
       source: source,
       added: added,
       outputPath: outputPath,
+      videoFormat: videoFormat,
+      subtitleFiles: subtitleFiles,
     );
     if (!built.hasStreams) {
       return FfmpegRunResult(
@@ -671,19 +1039,38 @@ class FfmpegService {
         '.${p.basenameWithoutExtension(outputPath)}.saving${p.extension(outputPath)}');
     final args = [...built.args]..last = tempOutput;
 
+    final video = source.mainVideo;
     final result = await _run(
       args,
       onProgress: onProgress,
-      totalDurationSeconds: source.durationSeconds,
+      totalDurationSeconds: video == null
+          ? source.durationSeconds
+          : programDuration(video.clips),
     );
 
     if (result.success) {
-      await File(tempOutput).rename(outputPath);
-    } else {
-      final tmp = File(tempOutput);
-      if (await tmp.exists()) await tmp.delete();
+      try {
+        await File(tempOutput).rename(outputPath);
+        return result;
+      } on FileSystemException catch (e) {
+        await _deleteQuietly(tempOutput);
+        return FfmpegRunResult(
+            exitCode: -1,
+            stderr: 'Não foi possível gravar ${p.basename(outputPath)}: '
+                '${e.osError?.message ?? e.message}');
+      }
     }
+    await _deleteQuietly(tempOutput);
     return result;
+  }
+
+  static Future<void> _deleteQuietly(String path) async {
+    try {
+      final file = File(path);
+      if (await file.exists()) await file.delete();
+    } on FileSystemException {
+      // sobra um arquivo oculto .saving; não vale esconder o erro original
+    }
   }
 
   Future<FfmpegRunResult> _run(
@@ -700,7 +1087,15 @@ class FfmpegService {
       args.last,
     ];
 
-    final process = await Process.start(ffmpegPath!, fullArgs);
+    final Process process;
+    try {
+      // SVT-AV1 escreve logs de info direto no stderr e enterraria o erro
+      process = await Process.start(ffmpegPath!, fullArgs,
+          environment: {'SVT_LOG': '1'});
+    } on ProcessException catch (e) {
+      return FfmpegRunResult(
+          exitCode: -1, stderr: 'Não foi possível executar o FFmpeg: ${e.message}');
+    }
     final stderrBuffer = StringBuffer();
 
     process.stdout

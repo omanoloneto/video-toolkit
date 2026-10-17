@@ -34,10 +34,23 @@ copied bit-for-bit.
 - **Timeline editing** — split audio tracks into segments, delete pieces,
   drag them along a zoomable timeline with playhead snapping, or type exact
   times (`90`, `1:30`, `1:02:03.5`).
-- **Auto-merge on save** — tracks that were cut apart are automatically
+- **Merge on save** — tracks that were cut apart are automatically
   mixed into a single output track at their timeline positions (e.g. the
   first 3 minutes of track 1 followed by the rest of track 2). Untouched or
-  merely delayed tracks stay separate.
+  merely delayed tracks stay separate. The merge button on each audio lane
+  (or the checkbox in the properties panel) overrides that: include a whole
+  track — say, an opening song placed before the dub — or keep a cut one
+  separate.
+- **Video cutting and inserting** — split the video lane (`S`) and remove a
+  piece: its audio and subtitles go with it and everything after moves back,
+  so nothing falls out of sync. Insert another video file at the playhead
+  (opening, ending...): it is fitted into the original frame, its sound fills
+  the gap in every audio track and the rest moves forward. Cuts are
+  frame-exact, so an edited video is always re-encoded on save.
+- **Compact formats** — on save, keep the original picture or re-encode to
+  **AV1** (SVT-AV1, about half the size at the same quality — VMAF ≈ 96.5 on
+  1080p anime) or **H.265** (plays on more devices, much slower to encode).
+  Lossless audio (FLAC, PCM...) becomes AAC 256 kb/s when compacting.
 - **Built-in preview** — video playback powered by
   [media_kit](https://pub.dev/packages/media_kit)/libmpv (plays MKV
   natively), synced with the timeline playhead. Choose which audio track to
@@ -65,7 +78,7 @@ Grab the latest build from the
 
 | Platform | File | Notes |
 | --- | --- | --- |
-| macOS | `VideoToolkit-<version>-macos.zip` | Unzip, drag to Applications. First launch: right-click → Open (unsigned build). |
+| macOS | `VideoToolkit-<version>-macos.zip` | Unzip, drag to Applications. The build is not notarized, so macOS blocks it on first launch — see [Opening on macOS](#opening-on-macos). |
 | Windows | `VideoToolkit-<version>-windows.zip` | Unzip anywhere, run `video_toolkit.exe`. |
 | Linux (Debian/Ubuntu) | `video-toolkit_<version>_amd64.deb` | `sudo apt install ./video-toolkit_<version>_amd64.deb` |
 
@@ -78,6 +91,22 @@ brew install ffmpeg  winget install ffmpeg    sudo apt install ffmpeg
 ```
 
 The `.deb` package already declares FFmpeg as a dependency.
+
+### Opening on macOS
+
+Release builds are ad-hoc signed, not notarized. Since macOS 15 the old
+right-click → Open trick is gone and macOS refuses to run a downloaded copy.
+Allow it once, either way:
+
+- **System Settings → Privacy & Security**, scroll to the message about
+  Video Toolkit and click **Open Anyway**; or
+- remove the download quarantine in Terminal:
+
+  ```sh
+  xattr -dr com.apple.quarantine "/Applications/Video Toolkit.app"
+  ```
+
+Builds you compile yourself (`flutter build macos`) are never quarantined.
 
 ## Keyboard shortcuts
 
@@ -101,7 +130,12 @@ single command per save:
    `-filter_complex`: each segment is `atrim`-ed, re-timed and `adelay`-ed
    to its timeline position, then all segments are mixed with `amix` and
    encoded to AAC.
-4. Subtitles are converted when the target container demands it (`srt` →
+4. An edited video becomes one input per piece (`-ss` to its start), cut
+   exactly with `trim`, scaled and padded into the original frame when it
+   comes from another file, and joined with `concat`; chapters are dropped
+   because they would point to the wrong places. Subtitles cut by the edit
+   are extracted, their cues moved piece by piece, and muxed back.
+5. Subtitles are converted when the target container demands it (`srt` →
    `mov_text` for MP4, exotic text formats → `srt` for MKV); image-based
    subtitles that cannot exist in MP4 are dropped with an explicit warning.
    MKV outputs also keep font attachments so ASS subtitles render correctly.

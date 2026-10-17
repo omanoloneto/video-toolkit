@@ -1,3 +1,4 @@
+import 'package:video_toolkit/models/program.dart';
 import 'package:video_toolkit/models/tracks.dart';
 import 'package:video_toolkit/services/ffmpeg_service.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -34,6 +35,22 @@ MediaTrack _audio(int streamIndex, int typeIndex, {double duration = 600}) {
   ));
   return track;
 }
+
+VideoClip _clip(String path, double start, double end,
+        {int width = 1432, int height = 1080}) =>
+    VideoClip(
+      path: path,
+      streamTypeIndex: 0,
+      width: width,
+      height: height,
+      rate: '2997/100',
+      sourceStart: start,
+      sourceEnd: end,
+      timelineStart: 0,
+    );
+
+MediaTrack _programVideo() =>
+    _video()..clips.add(_clip(kSource, 0, 600));
 
 MediaFileInfo _file(List<MediaTrack> tracks) => MediaFileInfo(
       path: kSource,
@@ -108,7 +125,7 @@ void main() {
       final filter = args.args[args.args.indexOf('-filter_complex') + 1];
       expect(filter, contains('atrim=start=60.000:end=300.000'));
       expect(filter, contains('adelay=30000:all=1'));
-      expect(filter, contains('anull[lane0]'));
+      expect(filter, contains('asetpts=N/SR/TB[lane0]'));
     });
 
     test('whole-track delay keeps stream copy via -itsoffset', () {
@@ -314,6 +331,63 @@ void main() {
       expect(joined, contains('-map 0:a:2'));
       expect(joined, contains('-itsoffset 2.000 -i /tmp/dub.mp3'));
     });
+
+    test('a whole song marked to merge fills the gap of a cut track', () {
+      // Abertura inteira no começo, a dublagem cortada depois dela.
+      final dub = _audio(1, 0)
+        ..segments.single.sourceStart = 90
+        ..segments.single.timelineStart = 90;
+      final opening = ExternalTrack(
+        path: '/tmp/abertura.mp3',
+        type: TrackType.audio,
+        codec: 'MP3',
+        details: '',
+        title: 'Abertura',
+        durationSeconds: 84,
+        channelLayout: 'stereo',
+      )..merge = true;
+      opening.segments.add(AudioSegment(
+        source: const AudioSource(path: '/tmp/abertura.mp3', audioTypeIndex: 0),
+        sourceStart: 0,
+        sourceEnd: 84,
+        timelineStart: 0,
+      ));
+
+      final result = service.buildSaveArgs(
+        source: _file([_video(), dub]),
+        added: [opening],
+        outputPath: '/tmp/out.mkv',
+      );
+      final joined = result.args.join(' ');
+      final filter = result.args[result.args.indexOf('-filter_complex') + 1];
+
+      expect(RegExp(r'-map \[lane').allMatches(joined).length, 1);
+      expect(joined, isNot(contains('-map 2:a:0')));
+      expect(filter, contains('[1:a:0]atrim=start=0.000:end=84.000'));
+      expect(filter,
+          contains('amix=inputs=2:duration=longest:normalize=0,asetpts=N/SR/TB'));
+      expect(result.warnings.single, contains('"Abertura"'));
+    });
+
+    test('a cut track marked to stay separate keeps its own track', () {
+      final a1 = _audio(1, 0)..segments.single.sourceEnd = 180;
+      final a2 = _audio(2, 1)
+        ..segments.single.sourceStart = 180
+        ..segments.single.timelineStart = 180
+        ..merge = false;
+
+      final result = service.buildSaveArgs(
+        source: _file([_video(), a1, a2]),
+        added: [],
+        outputPath: '/tmp/out.mkv',
+      );
+      final filter = result.args[result.args.indexOf('-filter_complex') + 1];
+
+      expect(filter, isNot(contains('amix')));
+      expect(RegExp(r'-map \[lane').allMatches(result.args.join(' ')).length,
+          2);
+      expect(result.warnings, isEmpty);
+    });
   });
 
   group('container compatibility', () {
@@ -417,6 +491,145 @@ void main() {
       expect(filter, contains('[1:a:0]atrim=start=10.000:end=200.000'));
       expect(filter, contains('adelay=5000:all=1'));
       expect(result.args.join(' '), contains('-c:a:1 aac'));
+    });
+  });
+
+  group('program edits', () {
+    test('a cut program is rebuilt clip by clip and re-encoded in AV1', () {
+      final video = _programVideo();
+      final file = _file([video, _audio(1, 0)]);
+      ProgramEdit(file, []).cut(0, 90);
+
+      final result = service.buildSaveArgs(
+        source: file,
+        added: [],
+        outputPath: '/tmp/out.mkv',
+      );
+      final joined = result.args.join(' ');
+      final filter = result.args[result.args.indexOf('-filter_complex') + 1];
+
+      expect(joined, contains('-ss 90.000 -i $kSource'));
+      expect(filter, contains('[1:v:0]trim=duration=510.000,setpts=PTS-STARTPTS,'
+          'setsar=1/1,fps=2997/100[pv0]'));
+      expect(filter, contains('[pv0]concat=n=1:v=1:a=0[program]'));
+      expect(joined, contains('-map [program]'));
+      expect(joined, contains('-c:v:0 libsvtav1 -preset:v:0 8 -crf:v:0 30'));
+      expect(joined, contains('-map_chapters -1'));
+      expect(result.warnings.first, contains('AV1'));
+    });
+
+    test('an inserted video is fitted into the program frame', () {
+      final video = _programVideo();
+      final file = _file([video, _audio(1, 0)]);
+      ProgramEdit(file, []).insert(
+        _clip('/tmp/abertura.mp4', 0, 84, width: 1920, height: 1080),
+        at: 0,
+        audio: const AudioSource(path: '/tmp/abertura.mp4', audioTypeIndex: 0),
+        audioDuration: 84,
+      );
+
+      final result = service.buildSaveArgs(
+        source: file,
+        added: [],
+        outputPath: '/tmp/out.mkv',
+        videoFormat: VideoFormat.hevc,
+      );
+      final joined = result.args.join(' ');
+      final filter = result.args[result.args.indexOf('-filter_complex') + 1];
+
+      expect(filter, contains(
+          'scale=1432:806,pad=1432:1080:0:137,setsar=1/1,fps=2997/100[pv0]'));
+      expect(filter, contains('[pv0][pv1]concat=n=2:v=1:a=0[program]'));
+      expect(filter, contains('[3:a:0]atrim=start=0.000:end=84.000'));
+      expect(joined, contains('-c:v:0 libx265'));
+    });
+
+    test('compacting an untouched file keeps it whole but shrinks it', () {
+      final flac = MediaTrack(
+        streamIndex: 1,
+        type: TrackType.audio,
+        typeIndex: 0,
+        codec: 'FLAC',
+        details: '',
+        originalTitle: '',
+        durationSeconds: 600,
+      )..segments.add(AudioSegment(
+          source: const AudioSource(path: kSource, audioTypeIndex: 0),
+          sourceStart: 0,
+          sourceEnd: 600,
+          timelineStart: 0,
+        ));
+
+      final result = service.buildSaveArgs(
+        source: _file([_programVideo(), flac]),
+        added: [],
+        outputPath: '/tmp/out.mkv',
+        videoFormat: VideoFormat.av1,
+      );
+      final joined = result.args.join(' ');
+
+      expect(joined, isNot(contains('-filter_complex')));
+      expect(joined, contains('-map 0:0'));
+      expect(joined, contains('-c:v:0 libsvtav1'));
+      expect(joined, contains('-c:a:0 aac -b:a:0 256k'));
+      expect(joined, isNot(contains('-map_chapters')));
+      expect(result.warnings.last, contains('AAC 256'));
+    });
+
+    test('keeping the format of an untouched file copies everything', () {
+      final result = service.buildSaveArgs(
+        source: _file([_programVideo(), _audio(1, 0)]),
+        added: [],
+        outputPath: '/tmp/out.mkv',
+      );
+      expect(result.args.join(' '), isNot(contains('libsvtav1')));
+      expect(result.warnings, isEmpty);
+    });
+
+    test('a cut subtitle comes from its rewritten file', () {
+      final sub = MediaTrack(
+        streamIndex: 2,
+        type: TrackType.subtitle,
+        typeIndex: 0,
+        codec: 'ASS',
+        details: '',
+        originalTitle: 'Kyoshiro',
+        durationSeconds: 600,
+        language: 'por',
+      );
+      final file = _file([_programVideo(), _audio(1, 0), sub]);
+      ProgramEdit(file, []).cut(0, 90);
+
+      expect(FfmpegService.subtitlesToRetime(file, []), [sub]);
+      final result = service.buildSaveArgs(
+        source: file,
+        added: [],
+        outputPath: '/tmp/out.mkv',
+        subtitleFiles: {sub: '/tmp/cortada.ass'},
+      );
+      final joined = result.args.join(' ');
+      expect(joined, contains('-i /tmp/cortada.ass'));
+      expect(RegExp(r'-map \d+:s:0').hasMatch(joined), isTrue);
+      expect(joined, contains('language=por'));
+    });
+
+    test('a cut bitmap subtitle is dropped with a warning', () {
+      final pgs = MediaTrack(
+        streamIndex: 2,
+        type: TrackType.subtitle,
+        typeIndex: 0,
+        codec: 'HDMV_PGS_SUBTITLE',
+        details: '',
+        originalTitle: 'PGS',
+        durationSeconds: 600,
+      );
+      final file = _file([_programVideo(), _audio(1, 0), pgs]);
+      ProgramEdit(file, []).cut(0, 90);
+
+      expect(FfmpegService.subtitlesToRetime(file, []), isEmpty);
+      final warnings = service.saveWarnings(
+          source: file, added: [], outputPath: '/tmp/out.mkv');
+      expect(warnings.any((w) => w.contains('"PGS"')), isTrue);
     });
   });
 }

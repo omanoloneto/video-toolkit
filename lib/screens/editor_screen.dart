@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/services.dart';
@@ -8,12 +9,15 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:path/path.dart' as p;
 
+import '../models/program.dart';
 import '../models/tracks.dart';
 import '../services/ffmpeg_service.dart';
 import '../theme/app_themes.dart';
 import '../theme/theme_icons.dart';
+import '../widgets/editor_keyboard.dart';
 import '../widgets/preview_panel.dart';
 import '../widgets/properties_panel.dart';
+import '../widgets/save_dialog.dart';
 import '../widgets/timeline_panel.dart';
 
 class EditorScreen extends StatefulWidget {
@@ -43,6 +47,11 @@ class _EditorScreenState extends State<EditorScreen> {
   bool _isPlaying = false;
   double _playhead = 0;
   Object? _monitorLane;
+  double? _appliedDelay;
+
+  // depois de um seek, o player ainda manda posições antigas por um instante
+  double _seekTarget = 0;
+  DateTime? _seekGuard;
 
   @override
   void initState() {
@@ -92,7 +101,16 @@ class _EditorScreenState extends State<EditorScreen> {
   Future<void> _initPlayer(String path) async {
     await _positionSub?.cancel();
     await _playingSub?.cancel();
-    await _player?.dispose();
+    final old = _player;
+    if (mounted) {
+      setState(() {
+        _player = null;
+        _videoController = null;
+        _isPlaying = false;
+      });
+    }
+    _appliedDelay = null;
+    await old?.dispose();
 
     final player = Player();
     final controller = VideoController(player);
@@ -101,9 +119,16 @@ class _EditorScreenState extends State<EditorScreen> {
     _positionSub = player.stream.position.listen((pos) {
       // While playing, the player drives the playhead; user scrubs drive
       // the player via _onScrub instead.
-      if (mounted && _isPlaying) {
-        setState(() => _playhead = pos.inMilliseconds / 1000);
+      if (!mounted || !_isPlaying) return;
+      final seconds = pos.inMilliseconds / 1000;
+      final guard = _seekGuard;
+      if (guard != null &&
+          DateTime.now().isBefore(guard) &&
+          (seconds - _seekTarget).abs() > 0.5) {
+        return;
       }
+      _seekGuard = null;
+      _followPlayer(seconds);
     });
     _playingSub = player.stream.playing.listen((playing) {
       if (mounted) setState(() => _isPlaying = playing);
@@ -119,21 +144,90 @@ class _EditorScreenState extends State<EditorScreen> {
     });
   }
 
+  List<VideoClip>? get _clips => _file?.mainVideo?.clips;
+
+  /// Onde a imagem acaba: o programa editado ou o próprio arquivo.
+  double get _contentEnd {
+    final clips = _clips;
+    return clips == null ? _file?.durationSeconds ?? 0 : programDuration(clips);
+  }
+
+  void _seekSource(double seconds) {
+    _seekTarget = seconds;
+    _seekGuard = DateTime.now().add(const Duration(milliseconds: 600));
+    _player?.seek(Duration(milliseconds: (seconds * 1000).round()));
+  }
+
+  /// O player só tem o arquivo original: o instante do programa vira o
+  /// instante do original; num vídeo inserido a prévia para.
   void _onScrub(double t) {
     setState(() => _playhead = t);
-    _player?.seek(Duration(milliseconds: (t * 1000).round()));
+    final clips = _clips;
+    final file = _file;
+    final source =
+        clips == null || file == null ? t : sourceTimeAt(clips, file.path, t);
+    if (source == null) {
+      _player?.pause();
+    } else {
+      _seekSource(source);
+    }
+    _syncAudioDelay();
+  }
+
+  /// Leva a posição do player pro programa, pulando o que foi cortado.
+  void _followPlayer(double source) {
+    final clips = _clips;
+    final file = _file;
+    final clip = clips == null ? null : clipAt(clips, _playhead);
+    if (clips == null || file == null || clip == null || clip.path != file.path) {
+      setState(() => _playhead = clips == null ? source : _playhead);
+      _syncAudioDelay();
+      return;
+    }
+    if (source < clip.sourceEnd - 0.03) {
+      setState(() => _playhead = clip.timelineStart +
+          (source - clip.sourceStart).clamp(0.0, clip.duration));
+      _syncAudioDelay();
+      return;
+    }
+    final next = clipAfter(clips, clip);
+    if (next == null) {
+      _player?.pause();
+      setState(() => _playhead = _contentEnd);
+    } else if (next.path != file.path) {
+      _player?.pause();
+      setState(() => _playhead = next.timelineStart);
+    } else {
+      setState(() => _playhead = next.timelineStart);
+      if ((next.sourceStart - source).abs() > 0.1) _seekSource(next.sourceStart);
+    }
     _syncAudioDelay();
   }
 
   void _togglePlay() {
     final player = _player;
     if (player == null) return;
+    final clips = _clips;
+    final file = _file;
+    if (!_isPlaying && clips != null && file != null) {
+      var clip = clipAt(clips, _playhead);
+      if (clip == null) {
+        _onScrub(0);
+        clip = clipAt(clips, 0);
+      }
+      // a prévia não mostra vídeo inserido: toca a partir do próximo trecho
+      while (clip != null && clip.path != file.path) {
+        clip = clipAfter(clips, clip);
+      }
+      if (clip == null) return;
+      if (clip.timelineStart > _playhead) _onScrub(clip.timelineStart);
+    }
     _syncAudioDelay();
     player.playOrPause();
   }
 
   void _stepSeconds(double delta) {
-    _onScrub((_playhead + delta).clamp(0.0, double.infinity));
+    _onScrub((_playhead + delta).clamp(0.0, _contentEnd));
   }
 
   Future<void> _setMonitorLane(Object? lane) async {
@@ -174,12 +268,118 @@ class _EditorScreenState extends State<EditorScreen> {
                   s.timelineStart <= _playhead && _playhead < s.timelineEnd)
               .firstOrNull ??
           segments.first;
-      delay = seg.timelineStart - seg.sourceStart;
+      // a imagem também está deslocada quando o vídeo foi cortado
+      final clips = _clips;
+      final clip = clips == null ? null : clipAt(clips, _playhead);
+      final videoShift = clip == null ? 0.0 : clip.timelineStart - clip.sourceStart;
+      delay = seg.timelineStart - seg.sourceStart - videoShift;
     }
+    final applied = _appliedDelay;
+    if (applied != null && (applied - delay).abs() < 0.0005) return;
     final platform = player.platform;
     if (platform is NativePlayer) {
+      _appliedDelay = delay;
       platform.setProperty('audio-delay', delay.toStringAsFixed(3));
     }
+  }
+
+  void _forgetMonitor(Object lane) {
+    if (identical(_monitorLane, lane)) _setMonitorLane(null);
+  }
+
+  // ------------------------------------------------------------ video edits
+
+  Future<void> _insertVideo() async {
+    final file = _file;
+    if (file?.mainVideo == null) return;
+    final picked = await _guard(() => FilePicker.pickFiles(
+          dialogTitle: 'Inserir vídeo no cursor',
+          type: FileType.custom,
+          allowedExtensions: ['mp4', 'mkv', 'mov', 'm4v', 'webm', 'avi'],
+        ));
+    final path = picked?.files.single.path;
+    if (path == null || file == null) return;
+    setState(() => _loading = true);
+    try {
+      final insertable = await _ffmpeg.probeVideoClip(path);
+      if (insertable == null) {
+        _showError('Vídeo inválido', '"${p.basename(path)}" não tem imagem.');
+        return;
+      }
+      final at = _playhead.clamp(0.0, _contentEnd);
+      setState(() {
+        ProgramEdit(file, _added).insert(
+          insertable.clip,
+          at: at,
+          audio: insertable.audioDuration > 0
+              ? AudioSource(path: path, audioTypeIndex: 0)
+              : null,
+          audioDuration: insertable.audioDuration,
+        );
+        _selection =
+            TimelineSelection(lane: file.mainVideo!, clip: insertable.clip);
+      });
+      _onScrub(at);
+      _showInfo('${p.basename(path)} entrou em ${formatTimelineTime(at)}');
+    } catch (e) {
+      _showError('Não foi possível ler "${p.basename(path)}"', e.toString());
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  /// Tira o trecho do vídeo e, junto, o áudio e a legenda desse pedaço.
+  Future<void> _deleteVideoClip(VideoClip clip) async {
+    final file = _file;
+    final clips = _clips;
+    if (file == null || clips == null) return;
+    if (clips.length == 1) {
+      _showError('Não dá pra remover',
+          'O vídeo precisa de pelo menos um trecho. Divida antes (S) e '
+              'remova só o pedaço que não quer.');
+      return;
+    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => ContentDialog(
+        title: const Text('Remover trecho do vídeo'),
+        content: Text(
+            'Sai de ${formatTimelineTime(clip.timelineStart)} a '
+            '${formatTimelineTime(clip.timelineEnd)}. O áudio e as legendas '
+            'desse pedaço também saem, e tudo o que vem depois anda junto.'),
+        actions: [
+          Button(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancelar'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Remover'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    late List<Object> emptied;
+    setState(() {
+      emptied =
+          ProgramEdit(file, _added).cut(clip.timelineStart, clip.timelineEnd);
+      for (final lane in emptied) {
+        if (lane is MediaTrack) lane.removed = true;
+        if (lane is ExternalTrack) _added.remove(lane);
+      }
+      _selection = null;
+    });
+    emptied.forEach(_forgetMonitor);
+    _onScrub(math.min(clip.timelineStart, _contentEnd));
+  }
+
+  void _removeExternal(ExternalTrack track) {
+    setState(() {
+      _added.remove(track);
+      if (identical(_selection?.lane, track)) _selection = null;
+    });
+    _forgetMonitor(track);
   }
 
   List<MonitorOption> _monitorOptions() {
@@ -255,6 +455,7 @@ class _EditorScreenState extends State<EditorScreen> {
       if (lane is MediaTrack) lane.removed = true;
       if (lane is ExternalTrack) _added.remove(lane);
     });
+    _forgetMonitor(lane);
   }
 
   void _deleteSegment(Object lane, AudioSegment segment) {
@@ -352,11 +553,16 @@ class _EditorScreenState extends State<EditorScreen> {
     if (outputPath == null) return;
 
     setState(() => _loading = true);
-    final result = await _ffmpeg.exportAudioTrack(
-      sourcePath: file.path,
-      audioTypeIndex: track.typeIndex,
-      outputPath: outputPath,
-    );
+    FfmpegRunResult result;
+    try {
+      result = await _ffmpeg.exportAudioTrack(
+        sourcePath: file.path,
+        audioTypeIndex: track.typeIndex,
+        outputPath: outputPath,
+      );
+    } catch (e) {
+      result = FfmpegRunResult(exitCode: -1, stderr: e.toString());
+    }
     if (!mounted) return;
     setState(() => _loading = false);
 
@@ -381,32 +587,20 @@ class _EditorScreenState extends State<EditorScreen> {
         ));
     if (outputPath == null) return;
 
-    final warnings = _ffmpeg.saveWarnings(
-        source: file, added: _added, outputPath: outputPath);
-    if (warnings.isNotEmpty && mounted) {
-      final proceed = await showDialog<bool>(
-        context: context,
-        builder: (context) => ContentDialog(
-          title: const Text('Avisos antes de salvar'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [for (final w in warnings) Text('• $w')],
-          ),
-          actions: [
-            Button(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('Cancelar'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.pop(context, true),
-              child: const Text('Continuar'),
-            ),
-          ],
-        ),
-      );
-      if (proceed != true) return;
-    }
+    // salvar por cima do original muda o arquivo que o editor descreve
+    final replacesSource = await isSameFile(outputPath, file.path);
+    if (!mounted) return;
+    final format = await showSaveDialog(
+      context,
+      videoEdited: !programUntouched(file),
+      warningsFor: (format) => _ffmpeg.saveWarnings(
+        source: file,
+        added: _added,
+        outputPath: outputPath,
+        videoFormat: format,
+      ),
+    );
+    if (format == null) return;
 
     final progress = ValueNotifier<double>(0);
     if (!mounted) return;
@@ -430,26 +624,48 @@ class _EditorScreenState extends State<EditorScreen> {
       ),
     );
 
-    final result = await _ffmpeg.save(
-      source: file,
-      added: _added,
-      outputPath: outputPath,
-      onProgress: (v) => progress.value = v,
-    );
+    FfmpegRunResult result;
+    try {
+      result = await _ffmpeg.save(
+        source: file,
+        added: _added,
+        outputPath: outputPath,
+        videoFormat: format,
+        onProgress: (v) => progress.value = v,
+      );
+    } catch (e) {
+      result = FfmpegRunResult(exitCode: -1, stderr: e.toString());
+    }
 
     if (!mounted) return;
     Navigator.of(context, rootNavigator: true).pop();
 
-    if (result.success) {
-      _showInfo('Vídeo salvo em ${p.basename(outputPath)}');
-    } else {
+    if (!result.success) {
       _showError('Falha ao salvar o vídeo', result.errorTail);
+      return;
+    }
+    if (replacesSource) {
+      await _loadFile(file.path);
+      _showInfo('Vídeo salvo e reaberto com as alterações');
+    } else {
+      _showInfo('Vídeo salvo em ${p.basename(outputPath)}');
     }
   }
 
   // ------------------------------------------------------------------- ui
 
+  String? _insertedNotice() {
+    final clips = _clips;
+    final file = _file;
+    if (clips == null || file == null) return null;
+    final clip = clipAt(clips, _playhead);
+    if (clip == null || clip.path == file.path) return null;
+    return 'Vídeo inserido: ${p.basename(clip.path)}\n'
+        'A prévia mostra só o vídeo original; o inserido entra ao salvar.';
+  }
+
   void _showInfo(String message) {
+    if (!mounted) return;
     displayInfoBar(
       context,
       builder: (context, close) => InfoBar(
@@ -753,13 +969,7 @@ class _EditorScreenState extends State<EditorScreen> {
     );
   }
 
-  KeyEventResult _handleKey(FocusNode node, KeyEvent event) {
-    if (event is! KeyDownEvent) return KeyEventResult.ignored;
-    final focusedContext = FocusManager.instance.primaryFocus?.context;
-    final typing = focusedContext?.widget is EditableText ||
-        focusedContext?.findAncestorWidgetOfExactType<EditableText>() != null;
-    if (typing) return KeyEventResult.ignored;
-
+  KeyEventResult _handleKey(KeyEvent event) {
     final key = event.logicalKey;
     if (key == LogicalKeyboardKey.space) {
       _togglePlay();
@@ -783,6 +993,14 @@ class _EditorScreenState extends State<EditorScreen> {
   bool _splitAtPlayhead() {
     final sel = _selection;
     if (sel == null) return false;
+    final clips = _clips;
+    if (clips != null && identical(sel.lane, _file?.mainVideo)) {
+      final clip = clips.where((c) => c.containsTimeline(_playhead)).firstOrNull;
+      if (clip == null || !splitSegment(clips, clip, _playhead)) return false;
+      setState(() =>
+          _selection = TimelineSelection(lane: sel.lane, clip: clip));
+      return true;
+    }
     final segments = switch (sel.lane) {
       MediaTrack(type: TrackType.audio, :final segments) => segments,
       ExternalTrack(type: TrackType.audio, :final segments) => segments,
@@ -807,6 +1025,10 @@ class _EditorScreenState extends State<EditorScreen> {
   bool _deleteSelected() {
     final sel = _selection;
     if (sel == null) return false;
+    if (sel.clip != null) {
+      _deleteVideoClip(sel.clip!);
+      return true;
+    }
     if (sel.segment != null) {
       _deleteSegment(sel.lane, sel.segment!);
       return true;
@@ -817,10 +1039,7 @@ class _EditorScreenState extends State<EditorScreen> {
       return true;
     }
     if (lane is ExternalTrack) {
-      setState(() {
-        _added.remove(lane);
-        _selection = null;
-      });
+      _removeExternal(lane);
       return true;
     }
     return false;
@@ -853,13 +1072,13 @@ class _EditorScreenState extends State<EditorScreen> {
         if (identical(_selection?.lane, track)) _selection = null;
       }
     });
+    if (track.removed) _forgetMonitor(track);
   }
 
   Widget _buildEditor(FluentThemeData theme) {
     final file = _file!;
-    return Focus(
-      autofocus: true,
-      onKeyEvent: _handleKey,
+    return EditorKeyboard(
+      onKey: _handleKey,
       child: Stack(
         children: [
           Column(
@@ -878,7 +1097,8 @@ class _EditorScreenState extends State<EditorScreen> {
                         controller: _videoController,
                         isPlaying: _isPlaying,
                         playhead: _playhead,
-                        durationSeconds: file.durationSeconds,
+                        durationSeconds: _contentEnd,
+                        notice: _insertedNotice(),
                         onTogglePlay: _togglePlay,
                         onStepSeconds: _stepSeconds,
                         monitorOptions: _monitorOptions(),
@@ -897,13 +1117,9 @@ class _EditorScreenState extends State<EditorScreen> {
                         onModelChanged: _onTimelineModelChanged,
                         onExportAudio: _exportAudio,
                         onToggleRemoved: _toggleRemoved,
-                        onRemoveExternal: (track) => setState(() {
-                          _added.remove(track);
-                          if (identical(_selection?.lane, track)) {
-                            _selection = null;
-                          }
-                        }),
+                        onRemoveExternal: _removeExternal,
                         onDeleteSegment: _deleteSegment,
+                        onDeleteVideoClip: _deleteVideoClip,
                       ),
                     ),
                   ],
@@ -928,6 +1144,7 @@ class _EditorScreenState extends State<EditorScreen> {
                     onModelChanged: _onTimelineModelChanged,
                     onLaneEmptied: _onLaneEmptied,
                     onEditSubtitleOffset: _editSubtitleOffset,
+                    onDeleteVideoClip: _deleteVideoClip,
                   ),
                 ),
               ),
@@ -951,7 +1168,9 @@ class _EditorScreenState extends State<EditorScreen> {
       children: [
         _buildFileCard(theme, file),
         const SizedBox(height: 12),
-        _buildSection(theme, 'Vídeo', ThemeIcons.of(context).video, TrackType.video),
+        _buildSection(theme, 'Vídeo', ThemeIcons.of(context).video, TrackType.video,
+            onAdd: file.mainVideo == null ? null : _insertVideo,
+            addTooltip: 'Inserir vídeo no cursor'),
         _buildSection(theme, 'Áudio', ThemeIcons.of(context).volume, TrackType.audio,
             onAdd: () => _addExternal(TrackType.audio)),
         _buildSection(theme, 'Legendas', ThemeIcons.of(context).cc, TrackType.subtitle,
@@ -1008,7 +1227,7 @@ class _EditorScreenState extends State<EditorScreen> {
 
   Widget _buildSection(
       FluentThemeData theme, String title, IconData icon, TrackType type,
-      {VoidCallback? onAdd}) {
+      {VoidCallback? onAdd, String addTooltip = 'Adicionar arquivo'}) {
     final tracks = _file!.byType(type);
     final external = _added.where((t) => t.type == type).toList();
 
@@ -1028,7 +1247,7 @@ class _EditorScreenState extends State<EditorScreen> {
               const Spacer(),
               if (onAdd != null)
                 Tooltip(
-                  message: 'Adicionar arquivo',
+                  message: addTooltip,
                   child: IconButton(
                     icon: Icon(ThemeIcons.of(context).add, size: 12),
                     onPressed: onAdd,
@@ -1083,6 +1302,8 @@ class _EditorScreenState extends State<EditorScreen> {
   Widget _buildTrackRow(FluentThemeData theme, MediaTrack track) {
     final flags = <String>[
       if (track.titleChanged) 'renomeada',
+      if (identical(track, _file!.mainVideo) && !programUntouched(_file!))
+        'editado',
       if (track.type == TrackType.audio && _audioEdited(track)) 'editada',
       if (track.type == TrackType.subtitle && track.offsetSeconds != 0)
         'deslocada ${formatOffset(track.offsetSeconds)}',
@@ -1177,10 +1398,7 @@ class _EditorScreenState extends State<EditorScreen> {
             message: 'Remover',
             child: IconButton(
               icon: Icon(ThemeIcons.of(context).delete, size: 13),
-              onPressed: () => setState(() {
-                _added.remove(track);
-                if (identical(_selection?.lane, track)) _selection = null;
-              }),
+              onPressed: () => _removeExternal(track),
             ),
           ),
         ],

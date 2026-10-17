@@ -32,10 +32,30 @@ MediaFileInfo _file(List<MediaTrack> tracks) => MediaFileInfo(
       tracks: tracks,
     );
 
+MediaTrack _video() => MediaTrack(
+      streamIndex: 0,
+      type: TrackType.video,
+      typeIndex: 0,
+      codec: 'H264',
+      details: '',
+      originalTitle: '',
+      durationSeconds: 100,
+    )..clips.add(VideoClip(
+        path: kSource,
+        streamTypeIndex: 0,
+        width: 1280,
+        height: 720,
+        rate: '25',
+        sourceStart: 0,
+        sourceEnd: 100,
+        timelineStart: 0,
+      ));
+
 Widget _wrap({
   required MediaFileInfo file,
   required TimelineSelection? selection,
   required ValueChanged<TimelineSelection?> onSelectionChanged,
+  ValueChanged<VideoClip>? onDeleteVideoClip,
 }) {
   var playhead = 0.0;
   return FluentApp(
@@ -57,6 +77,7 @@ Widget _wrap({
           onModelChanged: () => setState(() {}),
           onLaneEmptied: (_) {},
           onEditSubtitleOffset: (_) {},
+          onDeleteVideoClip: onDeleteVideoClip ?? (_) {},
         ),
       ),
     ),
@@ -132,6 +153,62 @@ void main() {
     expect(audio.segments[0].sourceEnd, audio.segments[1].sourceStart);
     expect(audio.segments[1].timelineStart,
         closeTo(audio.segments[0].timelineEnd, 0.001));
+  });
+
+  testWidgets('the merge button of a lane includes or excludes it',
+      (tester) async {
+    await useDesktopSurface(tester);
+    final audio = _audio(0);
+    final file = _file([audio]);
+
+    await tester.pumpWidget(_wrap(
+      file: file,
+      selection: null,
+      onSelectionChanged: (_) {},
+    ));
+
+    expect(audioLaneMerges(audio, file.path), isFalse);
+    await tester.tap(find.byKey(const ValueKey('merge-Faixa 0')));
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(audio.merge, isTrue);
+    expect(audioLaneMerges(audio, file.path), isTrue);
+
+    await tester.tap(find.byKey(const ValueKey('merge-Faixa 0')));
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(audio.merge, isFalse);
+  });
+
+  testWidgets('video clips can be selected, split and handed over to delete',
+      (tester) async {
+    await useDesktopSurface(tester);
+    final video = _video();
+    final file = _file([video, _audio(0)]);
+    TimelineSelection? selection;
+    VideoClip? deleted;
+
+    await tester.pumpWidget(_wrap(
+      file: file,
+      selection: null,
+      onSelectionChanged: (s) => selection = s,
+      onDeleteVideoClip: (clip) => deleted = clip,
+    ));
+
+    final clip = video.clips.single;
+    await tester.tap(find.byKey(ValueKey<Object>(clip)));
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(selection?.clip, same(clip));
+
+    await tester.tapAt(tester.getCenter(
+        find.byKey(const ValueKey('timeline-ruler'))));
+    await tester.pump();
+    await tester.tap(find.text('Dividir'));
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(video.clips, hasLength(2));
+    expect(video.clips[1].timelineStart, closeTo(video.clips[0].timelineEnd, 0.001));
+
+    await tester.tap(find.text('Excluir trecho'));
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(deleted, same(video.clips.first));
   });
 
   test('parseTimelineTime handles the common formats', () {
