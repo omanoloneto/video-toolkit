@@ -97,8 +97,9 @@ PreviewPlan buildPreviewPlan({
   required String? silenceFile,
   double silenceLength = 600,
 }) {
-  if (silenceLength <= 0) {
-    throw ArgumentError.value(silenceLength, 'silenceLength', 'must be > 0');
+  if (silenceLength.isNaN || silenceLength < _minLength) {
+    throw ArgumentError.value(
+        silenceLength, 'silenceLength', 'must be at least $_minLength');
   }
   final output = _monitoredOutput(file, added, monitor);
   final clips = file.mainVideo?.clips;

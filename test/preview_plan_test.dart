@@ -401,9 +401,25 @@ void main() {
       ]);
     });
 
-    test('the silent file must have some length', () {
-      expect(() => _plan(_file([_video(), _audio(0)]), silenceLength: 0),
-          throwsArgumentError);
+    test('the silent file must last at least a tenth of a millisecond', () {
+      final delayed = _audio(0)..segments.single.timelineStart = 1;
+      for (final length in [0.0, -600.0, double.nan, 0.00005]) {
+        expect(() => _plan(_file([_video(), delayed]), silenceLength: length),
+            throwsArgumentError,
+            reason: 'silenceLength $length');
+      }
+
+      final dub = _dub(8)..segments.single.timelineStart = 0.0002;
+      _expectEdl(
+          _plan(_file([_video(), _audio(0)]),
+              added: [dub], monitor: dub, silenceLength: 0.0001),
+          [
+            ..._wholeVideo,
+            ..._audioGroup,
+            '%15%/c/silence.flac,0.000000,0.000100',
+            '%15%/c/silence.flac,0.000000,0.000100',
+            '%10%/c/dub.mka,0.000000,8.000000',
+          ]);
     });
 
     test('an audio-only file has no image group and is not cut', () {
