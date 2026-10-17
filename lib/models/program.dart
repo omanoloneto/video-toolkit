@@ -83,26 +83,6 @@ VideoClip? clipAt(List<VideoClip> clips, double t) {
   return null;
 }
 
-/// Tempo do arquivo original no instante [t] do programa; null quando ali
-/// toca um vídeo inserido (ou já passou do fim).
-double? sourceTimeAt(List<VideoClip> clips, String sourcePath, double t) {
-  final clip = clipAt(clips, t);
-  if (clip == null || clip.path != sourcePath) return null;
-  return clip.sourceStart + (t - clip.timelineStart);
-}
-
-/// O trecho que começa onde [clip] termina.
-VideoClip? clipAfter(List<VideoClip> clips, VideoClip clip) {
-  VideoClip? next;
-  for (final c in clips) {
-    if (identical(c, clip) || c.timelineStart < clip.timelineEnd - 0.001) {
-      continue;
-    }
-    if (next == null || c.timelineStart < next.timelineStart) next = c;
-  }
-  return next;
-}
-
 /// O programa ainda é o vídeo original inteiro.
 bool programUntouched(MediaFileInfo file) {
   final video = file.mainVideo;

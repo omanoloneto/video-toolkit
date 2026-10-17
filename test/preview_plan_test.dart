@@ -173,6 +173,25 @@ void main() {
     test('a file without audio plays muted', () {
       expect(_plan(_file([_video()])), const SourcePreview(kSource, null));
     });
+
+    test('without a choice it plays the track players pick: the default one',
+        () {
+      final file = _file([
+        _video(),
+        _audio(0),
+        MediaTrack(
+          streamIndex: 2,
+          type: TrackType.audio,
+          typeIndex: 1,
+          codec: 'AAC',
+          details: '',
+          originalTitle: '',
+          durationSeconds: 20,
+          isDefault: true,
+        )..segments.add(_segment(kSource, 1, 0, 20, 0)),
+      ]);
+      expect(_plan(file), const SourcePreview(kSource, 2));
+    });
   });
 
   group('program', () {
@@ -199,6 +218,21 @@ void main() {
         '%8%/c/1.mka,0.000000,5.000000',
         '%8%/c/1.mka,10.000000,10.000000',
       ]);
+    });
+
+    test('splitting without changing what plays keeps the same preview', () {
+      final audio = _audio(0);
+      final file = _file([_video(), audio]);
+      ProgramEdit(file, []).cut(5, 10);
+      final before = _plan(file);
+
+      final clips = file.mainVideo!.clips;
+      splitSegment(clips, clips.last, 12);
+      splitSegment(audio.segments, audio.segments.last, 8);
+
+      expect(clips, hasLength(3));
+      expect(audio.segments, hasLength(3));
+      expect(_plan(file), before);
     });
 
     test('an inserted video shows in the image and in the sound', () {

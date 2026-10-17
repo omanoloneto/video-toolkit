@@ -86,7 +86,7 @@ final class PendingPreview extends PreviewPlan {
 }
 
 /// O que a prévia toca ouvindo [monitor]: uma faixa de áudio ou, com null
-/// (ou uma faixa que saiu), a primeira do arquivo salvo. [audioFile] dá a
+/// (ou uma faixa que saiu), a que os players tocam do arquivo salvo. [audioFile] dá a
 /// cópia de cada origem com só aquele áudio e [silenceFile] um silêncio de
 /// [silenceLength] segundos; null enquanto ainda não existem.
 PreviewPlan buildPreviewPlan({
@@ -121,29 +121,31 @@ PreviewPlan buildPreviewPlan({
   if (hasAudio) {
     final missing = <AudioSource>{};
     var silenceMissing = false;
-    lines.addAll([
-      '!new_stream',
-      '!no_chapters',
-      '!track_meta,lang=$kMonitorLanguage',
-    ]);
+    final entries = <_Entry>[];
     for (final (:segment, :from, :to) in spans) {
       if (segment != null) {
         final copy = audioFile(segment.source);
         if (copy == null) {
           missing.add(segment.source);
         } else {
-          lines.add(_entry(copy,
-              segment.sourceStart + (from - segment.timelineStart), to - from));
+          _append(entries, copy,
+              segment.sourceStart + (from - segment.timelineStart), to - from);
         }
       } else if (silenceFile == null) {
         silenceMissing = true;
       } else {
         for (var left = to - from; left >= _minLength; left -= silenceLength) {
-          lines.add(_entry(silenceFile, 0, math.min(left, silenceLength)));
+          _append(entries, silenceFile, 0, math.min(left, silenceLength));
         }
       }
     }
     if (missing.isNotEmpty || silenceMissing) return PendingPreview(missing);
+    lines.addAll([
+      '!new_stream',
+      '!no_chapters',
+      '!track_meta,lang=$kMonitorLanguage',
+      for (final entry in entries) _line(entry),
+    ]);
   }
   return EdlPreview('${lines.join('\n')}\n', hasAudio: hasAudio);
 }
@@ -152,6 +154,7 @@ List<Object> _monitoredOutput(
     MediaFileInfo file, List<ExternalTrack> added, Object? monitor) {
   final lanes = audioLanesInOrder(file, added);
   final lane = lanes.where((l) => identical(l, monitor)).firstOrNull ??
+      lanes.whereType<MediaTrack>().where((t) => t.isDefault).firstOrNull ??
       lanes.firstOrNull;
   return lane == null ? const [] : audioOutputOf(lane, file, added);
 }
@@ -180,13 +183,16 @@ List<String> _videoGroup(List<VideoClip> clips, String sourcePath) {
     for (final clip in clips)
       if (clip.duration >= _minLength) clip,
   ]..sort((a, b) => a.timelineStart.compareTo(b.timelineStart));
+  final entries = <_Entry>[];
+  for (final clip in ordered) {
+    _append(entries, clip.path, clip.sourceStart, clip.duration);
+  }
   // o original dita as faixas do grupo: as legendas dele aparecem na prévia
-  final layout = ordered.where((c) => c.path == sourcePath).firstOrNull;
+  final layout = entries.where((e) => e.path == sourcePath).firstOrNull;
   return [
     '!no_chapters',
-    for (final clip in ordered)
-      '${_entry(clip.path, clip.sourceStart, clip.duration)}'
-          '${identical(clip, layout) ? ',layout=this' : ''}',
+    for (final entry in entries)
+      _line(entry, layout: identical(entry, layout)),
   ];
 }
 
@@ -228,7 +234,23 @@ List<_Span> _audioSpans(List<AudioSegment> segments, double end) {
   return spans;
 }
 
+typedef _Entry = ({String path, double start, double length});
+
+/// Trechos seguidos do mesmo arquivo viram um só: dividir sem mudar o que
+/// toca não recarrega a prévia.
+void _append(List<_Entry> entries, String path, double start, double length) {
+  final last = entries.lastOrNull;
+  if (last != null &&
+      last.path == path &&
+      (last.start + last.length - start).abs() < 1e-6) {
+    entries.last = (path: path, start: last.start, length: last.length + length);
+  } else {
+    entries.add((path: path, start: start, length: length));
+  }
+}
+
 // caminho com o tamanho em bytes na frente: aceita vírgula, '=' e acento
-String _entry(String path, double start, double length) =>
-    '%${utf8.encode(path).length}%$path,'
-    '${start.toStringAsFixed(6)},${length.toStringAsFixed(6)}';
+String _line(_Entry entry, {bool layout = false}) =>
+    '%${utf8.encode(entry.path).length}%${entry.path},'
+    '${entry.start.toStringAsFixed(6)},${entry.length.toStringAsFixed(6)}'
+    '${layout ? ',layout=this' : ''}';
