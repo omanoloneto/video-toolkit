@@ -37,6 +37,7 @@ class _AudioLaneDesc {
     required this.language,
     required this.displayName,
     required this.merge,
+    required this.isDefault,
   });
 
   final List<AudioSegment> segments;
@@ -49,6 +50,7 @@ class _AudioLaneDesc {
   final String? language;
   final String displayName;
   final bool? merge;
+  final bool isDefault;
 
   bool get merges =>
       merge ??
@@ -609,6 +611,7 @@ class FfmpegService {
       required String codec,
       required String title,
       required String? language,
+      required bool isDefault,
     }) {
       if (segments.isEmpty) return;
 
@@ -679,6 +682,10 @@ class FfmpegService {
         laneCounter++;
       }
 
+      // a faixa que passa pelo filtro perde a marca do original e o FFmpeg
+      // marcaria a primeira saída; +/- mantém as outras marcas da faixa
+      metaArgs.addAll(
+          ['-disposition:a:$outAudio', isDefault ? '+default' : '-default']);
       addTitle(title);
       addLanguage(language);
       outAudio++;
@@ -709,6 +716,7 @@ class FfmpegService {
     // ---- audio auto-merge: lanes that were cut apart (fragmentary) are
     // combined into a single output track, mixed at their timeline
     // positions. Whole lanes — untouched or merely delayed — stay separate.
+    final defaultLane = defaultAudioLane(source, added);
     final laneDescs = <_AudioLaneDesc>[
       for (final track
           in source.tracks.where((t) => t.type == TrackType.audio && !t.removed))
@@ -725,6 +733,7 @@ class FfmpegService {
               ? track.title
               : 'Áudio ${track.typeIndex + 1}',
           merge: track.merge,
+          isDefault: identical(track, defaultLane),
         ),
       for (final track in added.where((t) => t.type == TrackType.audio))
         _AudioLaneDesc(
@@ -738,6 +747,7 @@ class FfmpegService {
           language: track.language,
           displayName: track.title,
           merge: track.merge,
+          isDefault: identical(track, defaultLane),
         ),
     ];
 
@@ -777,6 +787,7 @@ class FfmpegService {
           codec: desc.codec,
           title: desc.title,
           language: desc.language,
+          isDefault: merging.any((d) => d.isDefault),
         );
         return;
       }
@@ -789,6 +800,7 @@ class FfmpegService {
         codec: desc.codec,
         title: desc.title,
         language: desc.language,
+        isDefault: desc.isDefault,
       );
     }
 
@@ -849,6 +861,10 @@ class FfmpegService {
       }
       final input = inputFor(file);
       mapArgs.addAll(['-map', '$input:s:0']);
+      // o arquivo reescrito não traz a marca de padrão da faixa
+      if (lane is MediaTrack && lane.isDefault) {
+        metaArgs.addAll(['-disposition:s:$outSub', '+default']);
+      }
       addSubtitleCodecOverride(
           codec.toLowerCase() == 'ass' || codec.toLowerCase() == 'ssa'
               ? 'ass'

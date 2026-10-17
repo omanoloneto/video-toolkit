@@ -175,10 +175,10 @@ void _checkFillerLength(double length, String name) {
 
 List<Object> _monitoredOutput(
     MediaFileInfo file, List<ExternalTrack> added, Object? monitor) {
-  final lanes = audioLanesInOrder(file, added);
-  final lane = lanes.where((l) => identical(l, monitor)).firstOrNull ??
-      lanes.whereType<MediaTrack>().where((t) => t.isDefault).firstOrNull ??
-      lanes.firstOrNull;
+  final lane = audioLanesInOrder(file, added)
+          .where((l) => identical(l, monitor))
+          .firstOrNull ??
+      defaultAudioLane(file, added);
   return lane == null ? const [] : audioOutputOf(lane, file, added);
 }
 

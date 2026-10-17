@@ -376,6 +376,36 @@ Future<void> main() async {
               !text.contains('\num'),
           text.replaceAll('\n', ' | '));
     }
+
+    // -------------------------------------------------- default track edited
+    // a faixa padrão que passa pelo filtro segue sendo a que os players abrem,
+    // a mesma que a prévia toca
+    final flaggedSrc = '${dir.path}/padrao-na-segunda.mkv';
+    await _run(service.ffmpegPath!, [
+      '-y', '-i', src, '-map', '0', '-c', 'copy',
+      '-disposition:a:0', '0', '-disposition:a:1', 'default',
+      flaggedSrc,
+    ]);
+    for (final ext in ['mkv', 'mp4']) {
+      final flagged = await service.probe(flaggedSrc);
+      final en = flagged.byType(TrackType.audio)[1];
+      splitSegment(en.segments, en.segments.single, 3);
+      en.segments.removeAt(1);
+
+      final out = '${dir.path}/padrao-editada.$ext';
+      result = await service.save(source: flagged, added: [], outputPath: out);
+      check('edited default track save ($ext) succeeds', result.success,
+          result.errorTail);
+      if (!result.success) continue;
+      final defaults = [
+        for (final s in await _probeStreams(service.ffprobePath!, out))
+          if (s['codec_type'] == 'audio')
+            (s['disposition'] as Map<String, dynamic>)['default'],
+      ];
+      check('edited default track is still the default ($ext)',
+          defaults.length == 2 && defaults[0] == 0 && defaults[1] == 1,
+          '$defaults');
+    }
   } finally {
     await dir.delete(recursive: true);
   }

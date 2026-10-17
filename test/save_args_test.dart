@@ -15,7 +15,8 @@ MediaTrack _video() => MediaTrack(
       durationSeconds: 600,
     );
 
-MediaTrack _audio(int streamIndex, int typeIndex, {double duration = 600}) {
+MediaTrack _audio(int streamIndex, int typeIndex,
+    {double duration = 600, bool isDefault = false}) {
   final track = MediaTrack(
     streamIndex: streamIndex,
     type: TrackType.audio,
@@ -26,6 +27,7 @@ MediaTrack _audio(int streamIndex, int typeIndex, {double duration = 600}) {
     durationSeconds: duration,
     channelLayout: 'stereo',
     language: 'por',
+    isDefault: isDefault,
   );
   track.segments.add(AudioSegment(
     source: AudioSource(path: kSource, audioTypeIndex: typeIndex),
@@ -441,6 +443,123 @@ void main() {
       expect(RegExp(r'-map \[lane').allMatches(result.args.join(' ')).length,
           2);
       expect(result.warnings, isEmpty);
+    });
+  });
+
+  group('default audio', () {
+    ExternalTrack dub({bool? merge, double at = 0}) => ExternalTrack(
+          path: '/tmp/dub.mp3',
+          type: TrackType.audio,
+          codec: 'MP3',
+          details: '',
+          title: 'Dublagem',
+          durationSeconds: 600,
+          channelLayout: 'stereo',
+        )
+          ..merge = merge
+          ..segments.add(AudioSegment(
+            source: const AudioSource(path: '/tmp/dub.mp3', audioTypeIndex: 0),
+            sourceStart: at,
+            sourceEnd: 600,
+            timelineStart: at,
+          ));
+
+    String saved(List<MediaTrack> tracks,
+            {List<ExternalTrack> added = const []}) =>
+        service
+            .buildSaveArgs(
+              source: _file(tracks),
+              added: added,
+              outputPath: '/tmp/out.mkv',
+            )
+            .args
+            .join(' ');
+
+    test('is the flagged track left, else the first, as in the preview', () {
+      final first = _audio(1, 0);
+      final flagged = _audio(2, 1, isDefault: true);
+      final added = dub();
+
+      expect(defaultAudioLane(_file([_video(), first, flagged]), [added]),
+          same(flagged));
+      flagged.removed = true;
+      expect(defaultAudioLane(_file([_video(), first, flagged]), [added]),
+          same(first));
+      expect(defaultAudioLane(_file([_video()]), [added]), same(added));
+      expect(defaultAudioLane(_file([_video()]), []), isNull);
+    });
+
+    test('an edited default track is still the one players open', () {
+      // a faixa que passa pelo filtro perde a marca do original
+      final edited = _audio(2, 1, isDefault: true)
+        ..segments.single.sourceEnd = 300;
+
+      final joined = saved([_video(), _audio(1, 0), edited]);
+      expect(joined, contains('-map 0:a:0 -map [lane0]'));
+      expect(joined, contains('-disposition:a:0 -default'));
+      expect(joined, contains('-disposition:a:1 +default'));
+    });
+
+    test('without a flagged track the first one left is the default', () {
+      final removed = _audio(1, 0, isDefault: true)..removed = true;
+
+      final joined = saved([_video(), removed, _audio(2, 1), _audio(3, 2)],
+          added: [dub()]);
+      expect(joined, contains('-disposition:a:0 +default'));
+      expect(joined, contains('-disposition:a:1 -default'));
+      expect(joined, contains('-disposition:a:2 -default'));
+      expect(joined, isNot(contains('-disposition:a:3')));
+    });
+
+    test('a default track that merges makes the merged track the default', () {
+      final cut = _audio(2, 1, isDefault: true)
+        ..segments.single.sourceEnd = 180;
+
+      final joined = saved([_video(), _audio(1, 0), cut],
+          added: [dub(merge: true, at: 180)]);
+      expect(RegExp(r'-map \[lane').allMatches(joined).length, 1);
+      expect(joined, contains('-disposition:a:0 -default'));
+      expect(joined, contains('-disposition:a:1 +default'));
+      expect(joined, isNot(contains('-disposition:a:2')));
+    });
+
+    test('a cut subtitle keeps the default flag of its track', () {
+      final flagged = MediaTrack(
+        streamIndex: 2,
+        type: TrackType.subtitle,
+        typeIndex: 0,
+        codec: 'ASS',
+        details: '',
+        originalTitle: 'Placas',
+        durationSeconds: 600,
+        isDefault: true,
+      );
+      final plain = MediaTrack(
+        streamIndex: 3,
+        type: TrackType.subtitle,
+        typeIndex: 1,
+        codec: 'ASS',
+        details: '',
+        originalTitle: 'Completa',
+        durationSeconds: 600,
+      );
+      final file = _file([_programVideo(), _audio(1, 0), flagged, plain]);
+      ProgramEdit(file, []).cut(0, 90);
+
+      final joined = service
+          .buildSaveArgs(
+            source: file,
+            added: [],
+            outputPath: '/tmp/out.mkv',
+            subtitleFiles: {
+              flagged: '/tmp/placas.ass',
+              plain: '/tmp/completa.ass',
+            },
+          )
+          .args
+          .join(' ');
+      expect(joined, contains('-disposition:s:0 +default'));
+      expect(joined, isNot(contains('-disposition:s:1')));
     });
   });
 

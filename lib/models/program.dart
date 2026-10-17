@@ -91,6 +91,17 @@ bool programUntouched(MediaFileInfo file) {
       clip.sourceEnd >= video.durationSeconds - 0.05;
 }
 
+/// A faixa de áudio que os players abrem no arquivo salvo: a primeira
+/// marcada como padrão entre as do arquivo que ficam ou, sem marca, a
+/// primeira na ordem do salvar. Null sem áudio.
+Object? defaultAudioLane(MediaFileInfo file, List<ExternalTrack> added) {
+  final own =
+      file.tracks.where((t) => t.type == TrackType.audio && !t.removed);
+  return own.where((t) => t.isDefault).firstOrNull ??
+      own.firstOrNull ??
+      added.where((t) => t.type == TrackType.audio).firstOrNull;
+}
+
 /// Menor trecho que arrastar uma borda deixa.
 const double kMinPieceDuration = 0.05;
 
